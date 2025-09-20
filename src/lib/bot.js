@@ -170,6 +170,63 @@ function signupsColumns() {
 }
 
 /* =============================================================================
+   NEU: Guards gegen Doppel-/Cycle-Anmeldung
+============================================================================= */
+
+function toSqlDateTime(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// Mi 00:00 bis Di 23:59:59
+function computeCycleRange(baseDateStr) {
+  const base = baseDateStr ? new Date(baseDateStr.replace(" ", "T")) : new Date();
+  const d = new Date(base.getTime());
+  // 0=So,1=Mo,2=Di,3=Mi,...
+  const day = d.getDay(); // lokal
+  // finde Mittwoch derselben Woche (oder vorher)
+  const deltaToWed = (day >= 3) ? (day - 3) : (7 - (3 - day));
+  const wed = new Date(d.getFullYear(), d.getMonth(), d.getDate() - deltaToWed, 0, 0, 0);
+  const start = wed; // Mi 00:00
+  const end = new Date(start.getTime() + (6*24*60*60*1000) + (23*60*60*1000) + (59*60*1000) + 59*1000); // Di 23:59:59
+  return { startSql: toSqlDateTime(start), endSql: toSqlDateTime(end) };
+}
+
+function isAlreadyPickedHere(raidId, characterId) {
+  try {
+    const cols = signupsColumns();
+    if (!cols.hasCharId || !cols.hasPicked) return false;
+    const row = db.prepare(
+      `SELECT picked FROM signups WHERE raid_id=? AND ${cols.charCol}=? LIMIT 1`
+    ).get(raidId, characterId);
+    return row && Number(row.picked) === 1;
+  } catch { return false; }
+}
+
+function isCharLockedForCycle(raidId, characterId) {
+  try {
+    const raid = Raids.get ? Raids.get(raidId) : db.prepare(`SELECT * FROM raids WHERE id=?`).get(raidId);
+    if (!raid) return false;
+    const { startSql, endSql } = computeCycleRange(raid.datetime || null);
+    // Wenn Char im Cycle bereits irgendwo gepickt ist → sperren
+    const cols = signupsColumns();
+    if (!cols.hasCharId || !cols.hasPicked) return false;
+
+    const rows = db.prepare(
+      `SELECT r.id AS raid_id
+         FROM signups s
+         JOIN raids r ON r.id = s.raid_id
+        WHERE s.${cols.charCol}=? AND s.picked=1
+          AND r.datetime BETWEEN ? AND ?`
+    ).all(characterId, startSql, endSql);
+
+    if (!rows || rows.length === 0) return false;
+    // Wenn schon gepickt – auch wenn es derselbe Raid ist – melden wir blockierend zurück
+    return true;
+  } catch { return false; }
+}
+
+/* =============================================================================
    ZENTRALES UPSERT – schreibt in signup_class + lockout + note (ohne Roster-Repost)
 ============================================================================= */
 async function upsertSignup({ raidId, userId, characterId, role, saved, signupClass, note }) {
@@ -250,7 +307,7 @@ function buildTopEmbed(raid) {
 // ✅ Signups-Embed zeigt NUR ungepickte (picked=0)
 async function buildSignupsEmbed(raidId) {
   const all = await getSignups(raidId);
-  const unpicked = all.filter((s) => Number(s.picked) !== 1); // <-- hier die Filterung
+  const unpicked = all.filter((s) => Number(s.picked) !== 1); // <-- ungepickt
   const g = groupSignups(unpicked);
   return new EmbedBuilder()
     .setColor(0x2f3136)
@@ -395,7 +452,6 @@ export async function postRaidAnnouncement(raid) {
 
 export async function publishRoster(raidId) {
   // NICHT automatisch posten – nur die bestehende Nachricht enthält ein Roster-Embed.
-  // (Funktion bleibt für spätere manuelle Nutzung bestehen.)
   await updateRaidMessage(raidId);
 }
 
@@ -433,20 +489,31 @@ function wireUpInteractions(client) {
 
         if (key === "raid-signup") {
           const rows = getUserCharacters(interaction.user.id);
-          if (!rows.length) {
+
+          // 🚫 NEU: Charaktere filtern, die bereits gepickt sind (in diesem Raid ODER im aktuellen Mi–Di-Cycle)
+          const availableRows = rows.filter((c) => {
+            try {
+              if (isAlreadyPickedHere(raidId, c.id)) return false;
+              if (isCharLockedForCycle(raidId, c.id)) return false;
+              return true;
+            } catch { return true; }
+          });
+
+          if (!availableRows.length) {
             await interaction.reply({
               ephemeral: true,
-              content: "❌ Du hast noch keine Charaktere auf der Webseite registriert.",
+              content: "❌ Du hast aktuell keinen verfügbaren Charakter (bereits gepickt in diesem Raid oder im Mi–Di-Cycle).",
             });
             return;
           }
+
           const menu = new StringSelectMenuBuilder()
             .setCustomId(`raid-choose-char:${raidId}`)
             .setPlaceholder("Wähle deinen Charakter …")
             .setMinValues(1)
             .setMaxValues(1)
             .addOptions(
-              rows.slice(0, 25).map((c) => ({
+              availableRows.slice(0, 25).map((c) => ({
                 label: `${c.name} (${c.class}${c.spec ? `/${c.spec}` : ""})`,
                 description: `${(c.realm || "").toUpperCase()}  ilvl:${c.ilvl || "-"}`,
                 value: String(c.id),
@@ -476,9 +543,10 @@ function wireUpInteractions(client) {
         }
 
         if (key === "raid-unsign") {
+          await interaction.deferReply({ ephemeral: true });
           await removeSignup(raidId, interaction.user.id);
           await updateRaidMessage(raidId).catch(() => {});
-          await interaction.reply({ ephemeral: true, content: "✅ Du wurdest vom Raid abgemeldet." });
+          await interaction.editReply({ content: "✅ Du wurdest vom Raid abgemeldet." });
           return;
         }
 
@@ -489,11 +557,21 @@ function wireUpInteractions(client) {
       if (interaction.isStringSelectMenu()) {
         const id = String(interaction.customId || "");
 
-        // Booster-Char -> Rolle
+        // Booster-Char -> Rolle (mit Guards)
         if (id.startsWith("raid-choose-char:")) {
           const raidId = Number(id.split(":")[1]);
           const characterId = Number(interaction.values?.[0]) || null;
           if (!raidId || !characterId) return;
+
+          // NEU: Block, wenn schon gepickt (im Raid oder Cycle)
+          if (isAlreadyPickedHere(raidId, characterId)) {
+            await interaction.update({ content: "❌ Dieser Charakter ist in **diesem Raid** bereits gepickt.", components: [] });
+            return;
+          }
+          if (isCharLockedForCycle(raidId, characterId)) {
+            await interaction.update({ content: "❌ Dieser Charakter ist im aktuellen **Cycle (Mi–Di)** bereits gepickt.", components: [] });
+            return;
+          }
 
           const ch = getCharacter(characterId);
           if (!ch) {
@@ -592,12 +670,24 @@ function wireUpInteractions(client) {
       if (interaction.isModalSubmit()) {
         const id = String(interaction.customId || "");
 
-        // Booster-Modal
+        // Booster-Modal (mit Failsafe-Guards)
         if (id.startsWith("raid-note:")) {
           const [, raidIdStr, charIdStr, roleValue, savedValue] = id.split(":");
           const raidId = Number(raidIdStr);
           const characterId = Number(charIdStr);
           const note = interaction.fields.getTextInputValue("note") || null;
+
+          await interaction.deferReply({ ephemeral: true });
+
+          // Failsafe: nochmal blocken, falls erster Guard umgangen
+          if (isAlreadyPickedHere(raidId, characterId)) {
+            await interaction.editReply({ content: "❌ Dieser Charakter ist in **diesem Raid** bereits gepickt." });
+            return;
+          }
+          if (isCharLockedForCycle(raidId, characterId)) {
+            await interaction.editReply({ content: "❌ Dieser Charakter ist im aktuellen **Cycle (Mi–Di)** bereits gepickt." });
+            return;
+          }
 
           await upsertSignup({
             raidId,
@@ -605,12 +695,12 @@ function wireUpInteractions(client) {
             characterId,
             role: roleValue,
             saved: savedValue,
-            signupClass: null, // wird aus Character übernommen
+            signupClass: null,
             note,
           });
 
           await updateRaidMessage(raidId).catch(() => {});
-          await interaction.reply({ ephemeral: true, content: "✅ Angemeldet." });
+          await interaction.editReply({ content: "✅ Angemeldet." });
           return;
         }
 
@@ -619,6 +709,8 @@ function wireUpInteractions(client) {
           const [, raidIdStr, cls] = id.split(":");
           const raidId = Number(raidIdStr);
           const note = interaction.fields.getTextInputValue("note") || null;
+
+          await interaction.deferReply({ ephemeral: true });
 
           await upsertSignup({
             raidId,
@@ -631,8 +723,7 @@ function wireUpInteractions(client) {
           });
 
           await updateRaidMessage(raidId).catch(() => {});
-          await interaction.reply({
-            ephemeral: true,
+          await interaction.editReply({
             content: `✅ Als **Lootbuddy (${cls})** angemeldet.`,
           });
           return;
