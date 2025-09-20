@@ -167,8 +167,19 @@ function signupsColumns() {
   };
 }
 
+/* =============================================================================
+   WICHTIG: zentrales Upsert – Klasse IMMER schreiben
+   - Booster: Klasse aus Character übernehmen (falls nicht mitgegeben)
+   - Lootbuddy: Klasse kommt aus Dropdown, characterId = null
+============================================================================= */
 async function upsertSignup({ raidId, userId, characterId, role, saved, lootClass, note }) {
   const c = signupsColumns();
+
+  // Booster → Klasse automatisch vom Character übernehmen (wenn nicht gesetzt)
+  if (!lootClass && characterId != null) {
+    const ch = getCharacter(characterId);
+    if (ch?.class) lootClass = ch.class;
+  }
 
   // idempotent pro raid+user
   try { db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=?`).run(raidId, userId); } catch {}
@@ -251,7 +262,7 @@ async function buildSignupsEmbed(raidId) {
     .setFooter({ text: `RID:${raidId}` });
 }
 
-// NEU: Roster (nur gepickte) – falls kein 'picked'-Feld vorhanden, leeres Roster
+// Roster (nur gepickte) – falls kein 'picked'-Feld vorhanden, leeres Roster
 async function buildRosterEmbed(raidId) {
   let rows = [];
   try {
@@ -284,8 +295,21 @@ function buildButtons(raidId) {
   ];
 }
 
+// (Alt) einfaches Top-Embed; für volle Nachricht bitte buildRaidMessageFull nutzen.
 function buildRaidMessage(raid) {
   return { embeds: [buildTopEmbed(raid)], components: buildButtons(raid.id) };
+}
+
+// ✅ Volle Nachricht (Top + Roster + Signups)
+async function buildRaidMessageFull(raid) {
+  return {
+    embeds: [
+      buildTopEmbed(raid),
+      await buildRosterEmbed(raid.id),
+      await buildSignupsEmbed(raid.id),
+    ],
+    components: buildButtons(raid.id),
+  };
 }
 
 /* =============================================================================
@@ -346,21 +370,13 @@ export async function updateRaidMessage(raidId) {
       }
     }
 
-    const payload = {
-      embeds: [
-        buildTopEmbed(raid),
-        await buildRosterEmbed(raidId),   // <- Roster wieder drin
-        await buildSignupsEmbed(raidId),
-      ],
-      components: buildButtons(raidId),
-      allowedMentions: { parse: ["users"] },
-    };
+    const payload = await buildRaidMessageFull(raid);
 
     // 3) Edit, oder wenn gar nichts existiert → neu posten
     if (msg) {
-      await msg.edit(payload);
+      await msg.edit({ ...payload, allowedMentions: { parse: ["users"] } });
     } else {
-      const created = await channel.send(payload);
+      const created = await channel.send({ ...payload, allowedMentions: { parse: ["users"] } });
       try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(created.id, raid.id); } catch {}
     }
   } catch (e) {
@@ -368,20 +384,19 @@ export async function updateRaidMessage(raidId) {
   }
 }
 
+// ✅ Fix: im Raid-Channel posten (falls vorhanden), volle Embeds nutzen
 export async function postRaidAnnouncement(raid) {
   const client = getClient();
   if (!_ready) return;
-  const chId = process.env.CHANNEL_ID || "";
-  if (!chId) return;
 
-  const ch = await client.channels.fetch(chId).catch(() => null);
+  const channelId = raid?.channel_id || process.env.CHANNEL_ID || null;
+  if (!channelId) return;
+
+  const ch = await client.channels.fetch(channelId).catch(() => null);
   if (!ch) return;
 
-  const msg = await ch.send({
-    content: `📣 **Neuer Raid:** ${raid.title}`,
-    ...buildRaidMessage(raid),
-    allowedMentions: { parse: ["users"] },
-  });
+  const payload = await buildRaidMessageFull(raid);
+  const msg = await ch.send({ ...payload, allowedMentions: { parse: ["users"] } });
   return msg?.id || null;
 }
 
@@ -553,7 +568,7 @@ function wireUpInteractions(client) {
           return;
         }
 
-        // Booster-Saved speichern
+        // Booster-Saved speichern (Klasse wird in upsertSignup automatisch ergänzt)
         if (id.startsWith("raid-choose-saved:")) {
           const [, raidIdStr, charIdStr, roleValue] = id.split(":");
           const raidId = Number(raidIdStr);
@@ -567,7 +582,7 @@ function wireUpInteractions(client) {
             characterId,          // Booster mit Char
             role: roleValue,      // tank/healer/dps
             saved,
-            lootClass: null,
+            lootClass: null,      // → wird in upsertSignup automatisch vom Character gesetzt
             note,
           });
 
@@ -591,7 +606,7 @@ function wireUpInteractions(client) {
             characterId: null,    // KEIN Character!
             role: "lootbuddy",
             saved: "unsaved",     // immer unsaved
-            lootClass: cls,
+            lootClass: cls,       // → Klasse direkt aus Auswahl
             note: "lootbuddy",
           });
 
@@ -694,28 +709,14 @@ async function ensureRaidMessageFirstPost(channel, raid) {
       .filter((m) => m.author?.id === getClient().user?.id)
       .find((m) => (m.embeds?.[0]?.footer?.text || "").includes(`RID:${raid.id}`));
     if (mine) {
-      const payload = {
-        embeds: [
-          buildTopEmbed(raid),
-          await buildRosterEmbed(raid.id),
-          await buildSignupsEmbed(raid.id),
-        ],
-        components: buildButtons(raid.id),
-      };
+      const payload = await buildRaidMessageFull(raid);
       await mine.edit({ ...payload, allowedMentions: { parse: ["users"] } });
       try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(mine.id, raid.id); } catch {}
       return mine;
     }
   }
 
-  const payload = {
-    embeds: [
-      buildTopEmbed(raid),
-      await buildRosterEmbed(raid.id),
-      await buildSignupsEmbed(raid.id),
-    ],
-    components: buildButtons(raid.id),
-  };
+  const payload = await buildRaidMessageFull(raid);
   const msg = await channel.send({ ...payload, allowedMentions: { parse: ["users"] } });
   try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(msg.id, raid.id); } catch {}
   return msg;
