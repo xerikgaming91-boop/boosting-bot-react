@@ -142,6 +142,11 @@ CREATE TABLE IF NOT EXISTS signups (
   ensureColumn('signups', 'role', 'TEXT', 'NULL');
   ensureColumn('signups', 'slot', 'TEXT', 'NULL');
 
+  // 🔹 Zusatzspalten für die neuen Anforderungen:
+  ensureColumn('signups', 'saved', 'TEXT', `'unsaved'`);
+  ensureColumn('signups', 'note', 'TEXT', 'NULL');
+  ensureColumn('signups', 'loot_class', 'TEXT', 'NULL');
+
   cleanupSignupDuplicates();
 
   // Ein Char nur einmal pro Raid anmelden
@@ -298,6 +303,11 @@ export const Signups = {
     `).all(raid_id);
   },
 
+  // kompatibler Helper (falls der Bot ihn nutzt)
+  listByRaid(raid_id) {
+    return db.prepare(`SELECT * FROM signups WHERE raid_id=? ORDER BY created_at ASC, id ASC`).all(raid_id);
+  },
+
   listCharIdsForRaid(raid_id) {
     const rows = db.prepare(`SELECT character_id FROM signups WHERE raid_id=?`).all(raid_id);
     return new Set(rows.map((r) => r.character_id));
@@ -397,8 +407,8 @@ export const Signups = {
 
   create(payload) {
     const st = db.prepare(`
-      INSERT INTO signups (raid_id, user_id, character_id, role, slot, status, picked, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?, ?, ?)
+      INSERT INTO signups (raid_id, user_id, character_id, role, slot, status, picked, saved, note, loot_class, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?, ?, ?)
     `);
     const info = st.run(
       payload.raid_id,
@@ -408,6 +418,9 @@ export const Signups = {
       payload.slot || null,
       payload.status || 'signed',
       payload.picked ? 1 : 0,
+      payload.saved || 'unsaved',
+      payload.note || null,
+      payload.loot_class || null,
       now(), now()
     );
     return { id: info.lastInsertRowid };
