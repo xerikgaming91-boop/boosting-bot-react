@@ -1,0 +1,169 @@
+/* client/src/styles.css */
+
+:root{
+  --bg: #0f141a;
+  --panel: #141a21;
+  --panel-2: #17202a;
+  --muted: #8b9bb0;
+  --text: #e8f0fb;
+  --primary: #6d8dff;
+  --primary-2: #5b77df;
+  --danger: #dd6464;
+  --green: #39c07f;
+  --purple: #a178ff;
+  --shadow: 0 8px 24px rgba(0,0,0,.35);
+  --radius: 14px;
+  --radius-sm: 10px;
+  --gap: 16px;
+  --gap-sm: 10px;
+  --sep: 1px solid rgba(255,255,255,.06);
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body{
+  margin:0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+}
+
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.muted { color: var(--muted); }
+.right { text-align: right; }
+.mt-s{ margin-top: 8px; }
+.mb { margin-bottom: 24px; }
+.mr-s{ margin-right: 8px; }
+
+.container{
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+/* Topbar */
+.topbar{
+  position: sticky; top: 0; z-index: 20;
+  background: rgba(15,20,26,.75);
+  backdrop-filter: blur(6px);
+  border-bottom: var(--sep);
+}
+.topbar__inner{
+  display:flex; align-items:center; justify-content:space-between;
+  height: 56px;
+}
+.brand{ font-weight: 700; cursor: pointer; }
+.brand__dot{ width:10px; height:10px; display:inline-block; background:var(--primary); border-radius:50%; margin-right:8px; }
+
+.nav{ display:flex; gap: 16px; }
+.nav__link{ color:#d3dff4; padding: 8px 6px; border-radius: 10px; }
+.nav__link:hover{ background: rgba(255,255,255,.05); text-decoration: none; }
+
+.userbox{ display:flex; gap:10px; align-items:center; }
+.userbox__name{ color:#cfe2ff; }
+
+/* Buttons */
+.btn{
+  border:0; cursor:pointer; border-radius: 12px; padding: 10px 14px; font-weight:600;
+  background: var(--panel-2); color: var(--text);
+}
+.btn--sm{ padding: 6px 10px; border-radius: 10px; font-weight: 600; }
+.btn--primary{ background: var(--primary); color:#0b1020; }
+.btn--primary:hover{ background: var(--primary-2); }
+.btn--ghost{ background: transparent; border: 1px solid rgba(255,255,255,.2); }
+.btn--danger{ background: #2a1518; color: #ffb2b2; border:1px solid rgba(255,0,0,.2); }
+.btn--danger:hover{ background: #3a2024; }
+
+/* Inputs */
+.input, .select, textarea{
+  width:100%; background: var(--panel-2); color: var(--text);
+  border:1px solid rgba(255,255,255,.08); border-radius:12px; padding: 10px 12px;
+}
+.input::placeholder{ color: #a8b6cd; }
+.input--search{ background: var(--panel); }
+
+.form__group label{ display:block; margin-bottom:6px; color:#cfe2ff; }
+
+/* Layout */
+.page{ padding: 24px 0 60px; }
+.page__head{ display:flex; align-items:center; justify-content:space-between; margin-bottom: 16px; }
+.page__actions{ display:flex; gap:8px; }
+
+/* Cards */
+.card{
+  background: var(--panel);
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow:hidden;
+}
+.card--pad { padding: 16px; }
+
+/* Table */
+.table { width:100%; }
+.table__head, .table__row{
+  display:grid;
+  grid-template-columns: 2fr 1.3fr 1fr 1fr 1fr;
+  gap: 14px;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: var(--sep);
+}
+.table__head{ background: rgba(255,255,255,.02); font-weight:700; color:#d6e3ff; }
+.table__row:last-child{ border-bottom:0; }
+.table__row--link{ cursor:pointer; }
+.table__row--link:hover{ background: rgba(255,255,255,.03); }
+
+/* Tools */
+.list__tools{
+  display:flex; gap:12px; align-items:center; justify-content:space-between;
+  padding: 12px 16px; border-bottom: var(--sep);
+}
+
+/* Grid helper */
+.grid{ display:grid; }
+.grid--gap{ gap: 14px; }
+.grid--cols-4{ grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 900px){
+  .grid--cols-4{ grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 600px){
+  .grid--cols-4{ grid-template-columns: 1fr; }
+}
+
+/* Badges */
+.badge{
+  display:inline-flex; align-items:center; gap:6px; font-weight:700;
+  background: rgba(255,255,255,.06); color:#d6e3ff; padding: 4px 10px; border-radius: 999px;
+}
+.badge--green{ background: rgba(15, 168, 103, .25); color: #23e0a5; }
+.badge--purple{ background: rgba(161,120,255,.25); color: #c7b1ff; }
+
+/* Alerts */
+.alert{
+  margin: 8px 0 16px;
+  padding: 12px 14px;
+  border: 1px dashed rgba(255,255,255,.2);
+  border-radius: 12px;
+  color:#d6e3ff;
+}
+
+/* Dots / Klassenfarbe */
+.dot{ width:10px; height:10px; border-radius:50%; display:inline-block; margin-right:8px; transform: translateY(1px); }
+.charname{ display:flex; align-items:center; gap:8px; }
+
+/* Beispielhafte Klasse -> Farbe (erweitere nach Bedarf) */
+.dot--class-death-knight{ background:#c41f3b; }
+.dot--class-demon-hunter{ background:#a330c9; }
+.dot--class-druid{ background:#ff7d0a; }
+.dot--class-evoker{ background:#33937f; }
+.dot--class-hunter{ background:#aad372; }
+.dot--class-mage{ background:#3fc7eb; }
+.dot--class-monk{ background:#00ff98; }
+.dot--class-paladin{ background:#f48cba; }
+.dot--class-priest{ background:#ffffff; }
+.dot--class-rogue{ background:#fff468; }
+.dot--class-shaman{ background:#0070dd; }
+.dot--class-warlock{ background:#8788ee; }
+.dot--class-warrior{ background:#c69b6d; }

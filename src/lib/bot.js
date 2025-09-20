@@ -1,0 +1,722 @@
+// src/lib/bot.js
+import {
+  Client,
+  GatewayIntentBits,
+  Partials,
+  ChannelType,
+  PermissionsBitField,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+} from "discord.js";
+
+import { CONFIG } from "./config.js";
+import { db, Users, Raids, Signups } from "./db.js";
+
+/* =============================================================================
+   Discord Client (Singleton)
+============================================================================= */
+
+let _client = null;
+let _ready = false;
+
+function ensureRequiredEnvForBot() {
+  const miss = [];
+  if (!process.env.DISCORD_TOKEN) miss.push("DISCORD_TOKEN");
+  if (!CONFIG?.guildId && !process.env.GUILD_ID) miss.push("GUILD_ID");
+  if (miss.length) console.warn("⚠️ Bot-ENV unvollständig:", miss.join(", "));
+}
+
+export function getClient() {
+  if (_client) return _client;
+
+  ensureRequiredEnvForBot();
+
+  _client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+    ],
+    partials: [Partials.Channel, Partials.GuildMember, Partials.Message],
+  });
+
+  _client.once("ready", () => {
+    _ready = true;
+    console.log(`✅ Discord Bot eingeloggt als ${_client.user?.tag || "?"}`);
+  });
+
+  _client.on("error", (e) => console.error("Discord Client error:", e?.message || e));
+  _client.on("shardError", (e) => console.error("Discord Shard error:", e?.message || e));
+
+  const token = process.env.DISCORD_TOKEN;
+  if (token) {
+    _client.login(token).catch((e) => console.error("❌ Bot-Login fehlgeschlagen:", e?.message || e));
+  } else {
+    console.warn("⚠️ Kein DISCORD_TOKEN gesetzt – Bot-Features deaktiviert.");
+  }
+
+  wireUpInteractions(_client);
+  return _client;
+}
+
+export async function startBot({ timeoutMs = 15000 } = {}) {
+  getClient();
+  if (_ready) return _client;
+  await new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("Bot nicht ready (Timeout).")), timeoutMs);
+    const tick = () => { if (_ready) { clearTimeout(t); resolve(); } else setTimeout(tick, 200); };
+    tick();
+  });
+  return _client;
+}
+getClient();
+
+/* =============================================================================
+   Domain & Mapping
+============================================================================= */
+
+const CLASS_LIST = [
+  "Warrior","Paladin","Hunter","Rogue","Priest",
+  "Death Knight","Shaman","Mage","Warlock","Monk",
+  "Druid","Demon Hunter","Evoker"
+];
+
+function rolesForClass(cls) {
+  const map = {
+    Warrior: ["Tank","DPS"],
+    Paladin: ["Tank","Healer","DPS"],
+    Hunter: ["DPS"],
+    Rogue: ["DPS"],
+    Priest: ["Healer","DPS"],
+    "Death Knight": ["Tank","DPS"],
+    Shaman: ["Healer","DPS"],
+    Mage: ["DPS"],
+    Warlock: ["DPS"],
+    Monk: ["Tank","Healer","DPS"],
+    Druid: ["Tank","Healer","DPS"],
+    "Demon Hunter": ["Tank","DPS"],
+    Evoker: ["Healer","DPS"],
+  };
+  return map[cls] || ["DPS"];
+}
+
+// Lootbuddy priorisiert – nie in DPS/Healer/Tank
+function bucketForRole(role) {
+  const r = String(role || "").toLowerCase();
+  if (r === "lootbuddy" || r === "lb" || r === "lootbuddies") return "lootbuddies";
+  if (r === "tank") return "tanks";
+  if (r === "healer" || r === "heal") return "healers";
+  return "dps";
+}
+
+function mention(userId) {
+  return userId ? `<@${userId}>` : "—";
+}
+
+function nowSql() { return new Date().toISOString().slice(0, 19).replace("T", " "); }
+
+/* =============================================================================
+   DB Helpers
+============================================================================= */
+
+function getUserCharacters(userId) {
+  try {
+    return db.prepare(
+      `SELECT id,name,realm,region,class,spec,ilvl,wcl_url
+         FROM characters
+        WHERE user_id=?
+        ORDER BY name`
+    ).all(userId);
+  } catch { return []; }
+}
+
+function getCharacter(charId) {
+  try {
+    return db.prepare(
+      `SELECT id,user_id,name,realm,region,class,spec,ilvl,wcl_url
+         FROM characters WHERE id=?`
+    ).get(charId);
+  } catch { return null; }
+}
+
+async function getSignups(raidId) {
+  if (typeof Signups?.listByRaid === "function") return await Signups.listByRaid(raidId);
+  return db.prepare(`SELECT * FROM signups WHERE raid_id=? ORDER BY id`).all(raidId);
+}
+
+function signupsColumns() {
+  const rows = db.prepare(`PRAGMA table_info(signups)`).all();
+  const cols = rows.map((c) => c.name);
+  const charInfo = rows.find((r) => r.name === "character_id") || rows.find((r) => r.name === "char_id");
+  return {
+    hasCharId: cols.includes("character_id") || cols.includes("char_id"),
+    charCol: cols.includes("character_id") ? "character_id" : (cols.includes("char_id") ? "char_id" : null),
+    charNotNull: !!(charInfo && charInfo.notnull === 1),
+    hasLootClass: cols.includes("loot_class"),
+    hasNote: cols.includes("note"),
+    hasRole: cols.includes("role"),
+    hasSaved: cols.includes("saved"),
+    hasPicked: cols.includes("picked"),
+    hasStatus: cols.includes("status"),
+    hasCreatedAt: cols.includes("created_at"),
+    hasUpdatedAt: cols.includes("updated_at"),
+  };
+}
+
+async function upsertSignup({ raidId, userId, characterId, role, saved, lootClass, note }) {
+  const c = signupsColumns();
+
+  // idempotent pro raid+user
+  try { db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=?`).run(raidId, userId); } catch {}
+
+  const fields = ["raid_id", "user_id"];
+  const values = [raidId, userId];
+  const placeholders = ["?", "?"];
+
+  if (c.hasCharId) {
+    const value = characterId != null ? characterId : (c.charNotNull ? 0 : null);
+    fields.push(c.charCol); values.push(value); placeholders.push("?");
+  }
+  if (c.hasRole && role != null) { fields.push("role"); values.push(role); placeholders.push("?"); }
+  if (c.hasSaved && saved != null) { fields.push("saved"); values.push(saved); placeholders.push("?"); }
+  if (c.hasLootClass) { fields.push("loot_class"); values.push(lootClass || null); placeholders.push("?"); }
+  if (c.hasNote) { fields.push("note"); values.push(note || ""); placeholders.push("?"); }
+  if (c.hasPicked) { fields.push("picked"); values.push(0); placeholders.push("?"); }
+  if (c.hasStatus) { fields.push("status"); values.push("open"); placeholders.push("?"); }
+  if (c.hasCreatedAt) { fields.push("created_at"); values.push(nowSql()); placeholders.push("?"); }
+  if (c.hasUpdatedAt) { fields.push("updated_at"); values.push(nowSql()); placeholders.push("?"); }
+
+  const sql = `INSERT INTO signups (${fields.join(",")}) VALUES (${placeholders.join(",")})`;
+  db.prepare(sql).run(...values);
+}
+
+async function removeSignup(raidId, userId) {
+  try { db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=?`).run(raidId, userId); } catch {}
+}
+
+/* =============================================================================
+   Grouping & Embeds
+============================================================================= */
+
+function groupSignups(signups) {
+  const buckets = { tanks: [], healers: [], dps: [], lootbuddies: [] };
+  for (const s of signups) {
+    const bucket = bucketForRole(s.role);
+    const label = s.role === "lootbuddy" && s.loot_class
+      ? `${mention(s.user_id)} (${s.loot_class})`
+      : mention(s.user_id);
+    buckets[bucket].push(label);
+  }
+  return buckets;
+}
+
+function fieldFor(title, arr) {
+  const count = arr.length;
+  const value = count ? arr.join("\n") : "keine";
+  return { name: `${title} **(${count})**`, value, inline: true };
+}
+
+function buildTopEmbed(raid) {
+  const when = raid.datetime ? `\`${raid.datetime}\`` : "`tba`";
+  const lead = raid.created_by ? `<@${raid.created_by}>` : "—";
+  const loot = (raid.loot_type || "").toUpperCase();
+  return new EmbedBuilder()
+    .setColor(0x2f3136)
+    .setTitle(`${raid.title || "Raid"}`)
+    .setDescription("Anmeldungen über Website / Buttons")
+    .addFields(
+      { name: "Datum", value: when, inline: true },
+      { name: "Raid Leader", value: lead, inline: true },
+      { name: "Loot Type", value: loot || "—", inline: true },
+    )
+    .setFooter({ text: `RID:${raid.id}` });
+}
+
+async function buildSignupsEmbed(raidId) {
+  const signups = await getSignups(raidId);
+  const g = groupSignups(signups);
+  return new EmbedBuilder()
+    .setColor(0x2f3136)
+    .setTitle("Signups")
+    .addFields(
+      fieldFor("🛡️ Tanks", g.tanks),
+      fieldFor("✨ Healers", g.healers),
+      fieldFor("⚔️ DPS", g.dps),
+      fieldFor("💰 Lootbuddies", g.lootbuddies),
+    )
+    .setFooter({ text: `RID:${raidId}` });
+}
+
+// NEU: Roster (nur gepickte) – falls kein 'picked'-Feld vorhanden, leeres Roster
+async function buildRosterEmbed(raidId) {
+  let rows = [];
+  try {
+    const cols = signupsColumns();
+    if (cols.hasPicked) {
+      rows = db.prepare(`SELECT * FROM signups WHERE raid_id=? AND picked=1 ORDER BY id`).all(raidId);
+    }
+  } catch {}
+
+  const g = groupSignups(rows);
+  return new EmbedBuilder()
+    .setColor(0x2f3136)
+    .setTitle("Roster (geplant)")
+    .addFields(
+      fieldFor("🛡️ Tanks", g.tanks),
+      fieldFor("✨ Healers", g.healers),
+      fieldFor("⚔️ DPS", g.dps),
+      fieldFor("💰 Lootbuddies", g.lootbuddies),
+    )
+    .setFooter({ text: `RID:${raidId}` });
+}
+
+function buildButtons(raidId) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`raid-signup:${raidId}`).setStyle(ButtonStyle.Success).setLabel("Anmelden"),
+      new ButtonBuilder().setCustomId(`raid-unsign:${raidId}`).setStyle(ButtonStyle.Danger).setLabel("Abmelden"),
+      new ButtonBuilder().setCustomId(`raid-lootbuddy:${raidId}`).setStyle(ButtonStyle.Secondary).setLabel("Lootbuddy"),
+    ),
+  ];
+}
+
+function buildRaidMessage(raid) {
+  return { embeds: [buildTopEmbed(raid)], components: buildButtons(raid.id) };
+}
+
+/* =============================================================================
+   Public API: Channel & Messages
+============================================================================= */
+
+export async function createRaidChannel(raid, opts = {}) {
+  const client = getClient();
+  if (!_ready) throw new Error("Bot nicht ready");
+
+  const guildId = CONFIG.guildId || process.env.GUILD_ID;
+  const guild = await client.guilds.fetch(guildId);
+
+  const name = buildChannelName(raid);
+  const parentId = CONFIG.raidsCategoryId || process.env.RAIDS_CATEGORY_ID || null;
+
+  const chan = await guild.channels.create({
+    name,
+    type: ChannelType.GuildText,
+    parent: parentId || undefined,
+    permissionOverwrites: [
+      // Sichtbarkeit/Permissions ggf. hier pflegen
+    ],
+  });
+
+  await ensureRaidMessageFirstPost(chan, raid);
+  return chan.id;
+}
+
+// Nie reposten – vorhandene Message wird gesucht/editiert
+export async function updateRaidMessage(raidId) {
+  try {
+    const raid = await Raids.get(raidId);
+    if (!raid?.channel_id) return;
+
+    const client = getClient();
+    if (!_ready) return;
+
+    const channel = await client.channels.fetch(raid.channel_id).catch(() => null);
+    if (!channel) return;
+
+    // 1) vorhandene Nachricht über message_id laden
+    let msg = null;
+    if (raid.message_id) {
+      msg = await channel.messages.fetch(raid.message_id).catch(() => null);
+    }
+
+    // 2) Fallback: Suche im Kanal (per RID im Embed-Footer)
+    if (!msg) {
+      const fetched = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+      if (fetched) {
+        msg = fetched
+          .filter((m) => m.author?.id === getClient().user?.id)
+          .find((m) => (m.embeds?.[0]?.footer?.text || "").includes(`RID:${raid.id}`)) || null;
+        if (msg) {
+          try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(msg.id, raid.id); } catch {}
+        }
+      }
+    }
+
+    const payload = {
+      embeds: [
+        buildTopEmbed(raid),
+        await buildRosterEmbed(raidId),   // <- Roster wieder drin
+        await buildSignupsEmbed(raidId),
+      ],
+      components: buildButtons(raidId),
+      allowedMentions: { parse: ["users"] },
+    };
+
+    // 3) Edit, oder wenn gar nichts existiert → neu posten
+    if (msg) {
+      await msg.edit(payload);
+    } else {
+      const created = await channel.send(payload);
+      try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(created.id, raid.id); } catch {}
+    }
+  } catch (e) {
+    console.error("updateRaidMessage error:", e?.message || e);
+  }
+}
+
+export async function postRaidAnnouncement(raid) {
+  const client = getClient();
+  if (!_ready) return;
+  const chId = process.env.CHANNEL_ID || "";
+  if (!chId) return;
+
+  const ch = await client.channels.fetch(chId).catch(() => null);
+  if (!ch) return;
+
+  const msg = await ch.send({
+    content: `📣 **Neuer Raid:** ${raid.title}`,
+    ...buildRaidMessage(raid),
+    allowedMentions: { parse: ["users"] },
+  });
+  return msg?.id || null;
+}
+
+export async function publishRoster(raidId) {
+  const raid = await Raids.get(raidId);
+  if (!raid?.channel_id) return;
+  const client = getClient();
+  const ch = await client.channels.fetch(raid.channel_id).catch(() => null);
+  if (!ch) return;
+
+  // gepickte anzeigen, falls vorhanden – sonst leer
+  let rows = [];
+  try {
+    const cols = signupsColumns();
+    if (cols.hasPicked) {
+      rows = db.prepare(`SELECT * FROM signups WHERE raid_id=? AND picked=1 ORDER BY id`).all(raidId);
+    }
+  } catch {}
+
+  const g = groupSignups(rows);
+  const rosterText = [
+    `**Roster (geplant)**`,
+    `🛡️ **Tanks (${g.tanks.length})**\n${g.tanks.join("\n") || "_keine_"}`,
+    `✨ **Healers (${g.healers.length})**\n${g.healers.join("\n") || "_keine_"}`,
+    `⚔️ **DPS (${g.dps.length})**\n${g.dps.join("\n") || "_keine_"}`,
+    `💰 **Lootbuddies (${g.lootbuddies.length})**\n${g.lootbuddies.join("\n") || "_keine_"}`,
+  ].join("\n");
+
+  await ch.send({ content: rosterText, allowedMentions: { parse: ["users"] } });
+}
+
+export async function deleteGuildChannel(channelId) {
+  try {
+    if (!channelId) return { ok: true, info: "no channel id" };
+    const client = getClient();
+    const guild = await client.guilds.fetch(CONFIG.guildId || process.env.GUILD_ID);
+    const ch = await guild.channels.fetch(channelId).catch(()=>null);
+    if (ch) await ch.delete("Raid gelöscht");
+    return { ok: true };
+  } catch (e) {
+    const msg = e?.message || String(e);
+    if (e?.code === 50013) {
+      console.warn(`⚠️ Missing Permissions to delete channel ${channelId}`);
+      return { ok: false, error: "missing permissions" };
+    }
+    console.warn(`⚠️ deleteGuildChannel(${channelId}) failed:`, msg);
+    return { ok: false, error: msg };
+  }
+}
+
+/* =============================================================================
+   Interactions (Buttons & Selects)
+============================================================================= */
+
+function wireUpInteractions(client) {
+  client.on("interactionCreate", async (interaction) => {
+    try {
+      // ---------- Buttons ----------
+      if (interaction.isButton()) {
+        const [key, raidIdRaw] = String(interaction.customId || "").split(":");
+        const raidId = Number(raidIdRaw) || null;
+        if (!raidId || !key?.startsWith("raid-")) return;
+
+        if (key === "raid-signup") {
+          const rows = getUserCharacters(interaction.user.id);
+          if (!rows.length) {
+            await interaction.reply({
+              ephemeral: true,
+              content: "❌ Du hast noch keine Charaktere auf der Webseite registriert.",
+            });
+            return;
+          }
+          const menu = new StringSelectMenuBuilder()
+            .setCustomId(`raid-choose-char:${raidId}`)
+            .setPlaceholder("Wähle deinen Charakter …")
+            .setMinValues(1)
+            .setMaxValues(1)
+            .addOptions(
+              rows.slice(0, 25).map((c) => ({
+                label: `${c.name} (${c.class}${c.spec ? `/${c.spec}` : ""})`,
+                description: `${(c.realm || "").toUpperCase()}  ilvl:${c.ilvl || "-"}`,
+                value: String(c.id),
+              }))
+            );
+          await interaction.reply({
+            ephemeral: true,
+            content: "Wähle den Charakter für die Anmeldung:",
+            components: [new ActionRowBuilder().addComponents(menu)],
+          });
+          return;
+        }
+
+        if (key === "raid-lootbuddy") {
+          const menu = new StringSelectMenuBuilder()
+            .setCustomId(`raid-choose-lbclass:${raidId}`)
+            .setPlaceholder("Wähle deine Klasse als Lootbuddy …")
+            .setMinValues(1)
+            .setMaxValues(1)
+            .addOptions(CLASS_LIST.map((cls) => ({ label: cls, value: cls })));
+          await interaction.reply({
+            ephemeral: true,
+            content: "Lootbuddy-Anmeldung: Wähle deine Klasse:",
+            components: [new ActionRowBuilder().addComponents(menu)],
+          });
+          return;
+        }
+
+        if (key === "raid-unsign") {
+          await removeSignup(raidId, interaction.user.id);
+          await updateRaidMessage(raidId).catch(() => {});
+          await interaction.reply({ ephemeral: true, content: "✅ Du wurdest vom Raid abgemeldet." });
+          return;
+        }
+
+        return;
+      }
+
+      // ---------- Select-Menüs ----------
+      if (interaction.isStringSelectMenu()) {
+        const id = String(interaction.customId || "");
+
+        // Booster-Char -> Rolle
+        if (id.startsWith("raid-choose-char:")) {
+          const raidId = Number(id.split(":")[1]);
+          const characterId = Number(interaction.values?.[0]) || null;
+          if (!raidId || !characterId) return;
+
+          const ch = getCharacter(characterId);
+          if (!ch) {
+            await interaction.update({ content: "❌ Charakter nicht gefunden.", components: [] });
+            return;
+          }
+          const roles = rolesForClass(ch.class);
+          const roleMenu = new StringSelectMenuBuilder()
+            .setCustomId(`raid-choose-role:${raidId}:${characterId}`)
+            .setPlaceholder("Wähle die Rolle …")
+            .setMinValues(1)
+            .setMaxValues(1)
+            .addOptions(roles.map((r) => ({ label: r, value: r.toLowerCase() })));
+
+          await interaction.update({
+            content: `Char: **${ch.name} (${ch.class}${ch.spec ? `/${ch.spec}` : ""})**\nJetzt Rolle wählen:`,
+            components: [new ActionRowBuilder().addComponents(roleMenu)],
+          });
+          return;
+        }
+
+        // Booster-Rolle -> Saved/Unsaved
+        if (id.startsWith("raid-choose-role:")) {
+          const [, raidIdStr, charIdStr] = id.split(":");
+          const raidId = Number(raidIdStr);
+          const characterId = Number(charIdStr);
+          const role = String(interaction.values?.[0] || "dps").toLowerCase();
+
+          const savedMenu = new StringSelectMenuBuilder()
+            .setCustomId(`raid-choose-saved:${raidId}:${characterId}:${role}`)
+            .setPlaceholder("Saved oder Unsaved?")
+            .setMinValues(1)
+            .setMaxValues(1)
+            .addOptions([
+              { label: "Unsaved", value: "unsaved" },
+              { label: "Saved", value: "saved" },
+            ]);
+
+          await interaction.update({
+            content: `Rolle: **${role.toUpperCase()}**\nBist du **Saved**?`,
+            components: [new ActionRowBuilder().addComponents(savedMenu)],
+          });
+          return;
+        }
+
+        // Booster-Saved speichern
+        if (id.startsWith("raid-choose-saved:")) {
+          const [, raidIdStr, charIdStr, roleValue] = id.split(":");
+          const raidId = Number(raidIdStr);
+          const characterId = Number(charIdStr);
+          const saved = String(interaction.values?.[0] || "unsaved");
+          const note = `role=${roleValue};saved=${saved}`;
+
+          await upsertSignup({
+            raidId,
+            userId: interaction.user.id,
+            characterId,          // Booster mit Char
+            role: roleValue,      // tank/healer/dps
+            saved,
+            lootClass: null,
+            note,
+          });
+
+          await updateRaidMessage(raidId).catch(() => {});
+          await interaction.update({ content: "✅ Angemeldet.", components: [] });
+          return;
+        }
+
+        // Lootbuddy: Klasse -> direkt speichern (immer unsaved, ohne Character)
+        if (id.startsWith("raid-choose-lbclass:")) {
+          const raidId = Number(id.split(":")[1]);
+          const cls = interaction.values?.[0];
+          if (!raidId || !cls) {
+            await interaction.update({ content: "❌ Ungültige Auswahl.", components: [] });
+            return;
+          }
+
+          await upsertSignup({
+            raidId,
+            userId: interaction.user.id,
+            characterId: null,    // KEIN Character!
+            role: "lootbuddy",
+            saved: "unsaved",     // immer unsaved
+            lootClass: cls,
+            note: "lootbuddy",
+          });
+
+          await updateRaidMessage(raidId).catch(() => {});
+          await interaction.update({
+            content: `✅ Als **Lootbuddy (${cls})** angemeldet.`,
+            components: [],
+          });
+          return;
+        }
+      }
+    } catch (e) {
+      console.error("[interactionCreate] error:", e?.message || e);
+      try {
+        if (interaction?.replied || interaction?.deferred) {
+          await interaction.followUp({ ephemeral: true, content: "Es ist ein Fehler aufgetreten." });
+        } else {
+          await interaction.reply({ ephemeral: true, content: "Es ist ein Fehler aufgetreten." });
+        }
+      } catch {}
+    }
+  });
+}
+
+/* =============================================================================
+   Roles / Permissions
+============================================================================= */
+
+async function getGuild() {
+  if (!_ready) await startBot();
+  const gid = process.env.GUILD_ID || CONFIG.guildId;
+  return getClient().guilds.fetch(gid);
+}
+
+export async function ensureMemberRaidleadFlag(discordUserId) {
+  try {
+    const guild = await getGuild();
+    const member = await guild.members.fetch(discordUserId).catch(() => null);
+    if (!member) return;
+
+    const raidleadRoleId = process.env.RAIDLEAD_ROLE_ID || "";
+    const hasRole = raidleadRoleId ? member.roles.cache.has(raidleadRoleId) : false;
+
+    const isOwner = guild.ownerId === member.id;
+    const perms   = member.permissions;
+    const isAdmin = perms?.has(PermissionsBitField.Flags.Administrator) || perms?.has(PermissionsBitField.Flags.ManageGuild);
+
+    const isRaidlead = hasRole || isOwner || isAdmin ? 1 : 0;
+    if (typeof Users?.setRaidlead === "function") {
+      Users.setRaidlead(discordUserId, isRaidlead);
+    }
+  } catch (e) {
+    console.warn("ensureMemberRaidleadFlag:", e?.message || e);
+  }
+}
+
+export async function hasElevatedRaidPermissions(discordUserId) {
+  try {
+    const guild = await getGuild();
+    const member = await guild.members.fetch(discordUserId).catch(() => null);
+    if (!member) return false;
+    const elevatedRoleId = process.env.ELEVATED_ROLE_ID || process.env.ELEVATGED_ROLE_ID || "";
+    if (elevatedRoleId && member.roles.cache.has(elevatedRoleId)) return true;
+    if (guild.ownerId === member.id) return true;
+    const perms = member.permissions;
+    if (perms?.has(PermissionsBitField.Flags.Administrator) || perms?.has(PermissionsBitField.Flags.ManageGuild)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/* =============================================================================
+   Channel Utilities
+============================================================================= */
+
+function buildChannelName(raid) {
+  try {
+    const dtStr = raid.datetime || "";
+    const d = new Date(dtStr.replace(" ", "T"));
+    const tag = ["So","Mo","Di","Mi","Do","Fr","Sa"][isNaN(d) ? 0 : (d.getDay()+6)%7] || "So";
+    const hh = isNaN(d) ? "00" : String(d.getHours()).padStart(2,"0");
+    const mm = isNaN(d) ? "00" : String(d.getMinutes()).padStart(2,"0");
+    const diff = String(raid.difficulty || "Normal");
+    const loot = String(raid.loot_type || "").toUpperCase() || "UNSAVED";
+    return `${tag}-${diff}-${loot}-${hh}:${mm}`;
+  } catch {
+    const dt = (raid.datetime || "").replace(/[ :]/g, "-").replace(/--/g, "-");
+    const diff = String(raid.difficulty || "n");
+    const loot = String(raid.loot_type || "unsaved");
+    const safe = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 90);
+    return safe(`raid-${dt}-${diff}-${loot}`);
+  }
+}
+
+async function ensureRaidMessageFirstPost(channel, raid) {
+  const fetched = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+  if (fetched) {
+    const mine = fetched
+      .filter((m) => m.author?.id === getClient().user?.id)
+      .find((m) => (m.embeds?.[0]?.footer?.text || "").includes(`RID:${raid.id}`));
+    if (mine) {
+      const payload = {
+        embeds: [
+          buildTopEmbed(raid),
+          await buildRosterEmbed(raid.id),
+          await buildSignupsEmbed(raid.id),
+        ],
+        components: buildButtons(raid.id),
+      };
+      await mine.edit({ ...payload, allowedMentions: { parse: ["users"] } });
+      try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(mine.id, raid.id); } catch {}
+      return mine;
+    }
+  }
+
+  const payload = {
+    embeds: [
+      buildTopEmbed(raid),
+      await buildRosterEmbed(raid.id),
+      await buildSignupsEmbed(raid.id),
+    ],
+    components: buildButtons(raid.id),
+  };
+  const msg = await channel.send({ ...payload, allowedMentions: { parse: ["users"] } });
+  try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(msg.id, raid.id); } catch {}
+  return msg;
+}
