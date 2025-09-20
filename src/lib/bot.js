@@ -161,7 +161,7 @@ function signupsColumns() {
     hasSignupClass: cols.includes("signup_class"),
     hasNote: cols.includes("note"),
     hasRole: cols.includes("role"),
-    hasLockout: cols.includes("lockout"),   // ← statt saved
+    hasLockout: cols.includes("lockout"),
     hasPicked: cols.includes("picked"),
     hasStatus: cols.includes("status"),
     hasCreatedAt: cols.includes("created_at"),
@@ -170,7 +170,7 @@ function signupsColumns() {
 }
 
 /* =============================================================================
-   NEU: Guards gegen Doppel-/Cycle-Anmeldung
+   Guards (Doppel-/Cycle)
 ============================================================================= */
 
 function toSqlDateTime(d) {
@@ -182,13 +182,11 @@ function toSqlDateTime(d) {
 function computeCycleRange(baseDateStr) {
   const base = baseDateStr ? new Date(baseDateStr.replace(" ", "T")) : new Date();
   const d = new Date(base.getTime());
-  // 0=So,1=Mo,2=Di,3=Mi,...
-  const day = d.getDay(); // lokal
-  // finde Mittwoch derselben Woche (oder vorher)
+  const day = d.getDay(); // 0=So .. 3=Mi
   const deltaToWed = (day >= 3) ? (day - 3) : (7 - (3 - day));
   const wed = new Date(d.getFullYear(), d.getMonth(), d.getDate() - deltaToWed, 0, 0, 0);
-  const start = wed; // Mi 00:00
-  const end = new Date(start.getTime() + (6*24*60*60*1000) + (23*60*60*1000) + (59*60*1000) + 59*1000); // Di 23:59:59
+  const start = wed;
+  const end = new Date(start.getTime() + (6*24*60*60*1000) + (23*60*60*1000) + (59*60*1000) + 59*1000);
   return { startSql: toSqlDateTime(start), endSql: toSqlDateTime(end) };
 }
 
@@ -203,43 +201,67 @@ function isAlreadyPickedHere(raidId, characterId) {
   } catch { return false; }
 }
 
+/**
+ * 🔁 NEU: Cycle-Lock gilt **pro Schwierigkeit**.
+ * Wenn der Charakter im aktuellen Mi→Di-Zeitraum bereits in **derselben Schwierigkeit**
+ * gepickt ist, blockieren wir. Andere Schwierigkeiten bleiben erlaubt.
+ */
 function isCharLockedForCycle(raidId, characterId) {
   try {
     const raid = Raids.get ? Raids.get(raidId) : db.prepare(`SELECT * FROM raids WHERE id=?`).get(raidId);
     if (!raid) return false;
+
     const { startSql, endSql } = computeCycleRange(raid.datetime || null);
-    // Wenn Char im Cycle bereits irgendwo gepickt ist → sperren
     const cols = signupsColumns();
     if (!cols.hasCharId || !cols.hasPicked) return false;
 
+    // nur gleiche Schwierigkeit sperren
     const rows = db.prepare(
       `SELECT r.id AS raid_id
          FROM signups s
          JOIN raids r ON r.id = s.raid_id
-        WHERE s.${cols.charCol}=? AND s.picked=1
+        WHERE s.${cols.charCol}=? 
+          AND s.picked=1
+          AND r.difficulty = ?
           AND r.datetime BETWEEN ? AND ?`
-    ).all(characterId, startSql, endSql);
+    ).all(characterId, raid.difficulty || null, startSql, endSql);
 
-    if (!rows || rows.length === 0) return false;
-    // Wenn schon gepickt – auch wenn es derselbe Raid ist – melden wir blockierend zurück
-    return true;
+    return !!(rows && rows.length);
+  } catch { return false; }
+}
+
+function hasSignupInRaid(raidId, characterId, userId) {
+  try {
+    const cols = signupsColumns();
+    if (!cols.hasCharId) return false;
+    const row = db.prepare(
+      `SELECT id FROM signups WHERE raid_id=? AND user_id=? AND ${cols.charCol}=? LIMIT 1`
+    ).get(raidId, userId, characterId);
+    return !!row;
   } catch { return false; }
 }
 
 /* =============================================================================
-   ZENTRALES UPSERT – schreibt in signup_class + lockout + note (ohne Roster-Repost)
+   Upsert Signup (mehrere Chars, keine Duplikate pro Char)
 ============================================================================= */
 async function upsertSignup({ raidId, userId, characterId, role, saved, signupClass, note }) {
   const c = signupsColumns();
 
-  // Booster → Klasse automatisch vom Character übernehmen (wenn nicht mitgegeben)
+  // Booster → Klasse vom Charakter übernehmen, wenn nicht gesetzt
   if (!signupClass && characterId != null) {
     const ch = getCharacter(characterId);
     if (ch?.class) signupClass = ch.class;
   }
 
-  // idempotent pro raid+user
-  try { db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=?`).run(raidId, userId); } catch {}
+  // nur Duplikat des gleichen Chars (oder LB-Klasse) im selben Raid entfernen
+  try {
+    if (characterId != null && c.hasCharId) {
+      db.prepare(`DELETE FROM signups WHERE raid_id=? AND ${c.charCol}=?`).run(raidId, characterId);
+    } else if (role === "lootbuddy" && c.hasSignupClass) {
+      db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=? AND role='lootbuddy' AND signup_class IS ?`)
+        .run(raidId, userId, signupClass || null);
+    }
+  } catch {}
 
   const fields = ["raid_id", "user_id"];
   const values = [raidId, userId];
@@ -264,6 +286,51 @@ async function upsertSignup({ raidId, userId, characterId, role, saved, signupCl
 
 async function removeSignup(raidId, userId) {
   try { db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=?`).run(raidId, userId); } catch {}
+}
+
+function listUserSignupsForRaid(raidId, userId, { onlyUnpicked = false } = {}) {
+  try {
+    const cols = signupsColumns();
+    const cond = onlyUnpicked ? "AND picked=0" : "";
+    const sql = `
+      SELECT id, ${cols.charCol || "character_id"} AS character_id, role, signup_class, picked
+      FROM signups
+      WHERE raid_id=? AND user_id=? ${cond}
+      ORDER BY id
+    `;
+    return db.prepare(sql).all(raidId, userId);
+  } catch { return []; }
+}
+
+function getSignupById(signupId, userId) {
+  try {
+    const cols = signupsColumns();
+    return db.prepare(
+      `SELECT id, ${cols.charCol || "character_id"} AS character_id, role, signup_class, picked, user_id
+         FROM signups WHERE id=? AND user_id=? LIMIT 1`
+    ).get(signupId, userId);
+  } catch { return null; }
+}
+
+function getSignupsByIds(ids, userId) {
+  if (!ids.length) return [];
+  try {
+    const placeholders = ids.map(() => "?").join(",");
+    const cols = signupsColumns();
+    const sql = `
+      SELECT id, ${cols.charCol || "character_id"} AS character_id, role, signup_class, picked, user_id
+      FROM signups
+      WHERE id IN (${placeholders}) AND user_id=?
+      ORDER BY id
+    `;
+    return db.prepare(sql).all(...ids, userId);
+  } catch { return []; }
+}
+
+function deleteSignupById(signupId, userId) {
+  try {
+    return db.prepare(`DELETE FROM signups WHERE id=? AND user_id=?`).run(signupId, userId).changes > 0;
+  } catch { return false; }
 }
 
 /* =============================================================================
@@ -307,7 +374,7 @@ function buildTopEmbed(raid) {
 // ✅ Signups-Embed zeigt NUR ungepickte (picked=0)
 async function buildSignupsEmbed(raidId) {
   const all = await getSignups(raidId);
-  const unpicked = all.filter((s) => Number(s.picked) !== 1); // <-- ungepickt
+  const unpicked = all.filter((s) => Number(s.picked) !== 1);
   const g = groupSignups(unpicked);
   return new EmbedBuilder()
     .setColor(0x2f3136)
@@ -367,6 +434,48 @@ async function buildRaidMessageFull(raid) {
     ],
     components: buildButtons(raid.id),
   };
+}
+
+/* =============================================================================
+   Benachrichtigung an Raidlead bei UNSIGN von PICKED
+============================================================================= */
+
+async function notifyRaidleadPickedUnsign(raidId, byUserId, items, reason) {
+  try {
+    const raid = Raids.get ? await Raids.get(raidId) : db.prepare(`SELECT * FROM raids WHERE id=?`).get(raidId);
+    if (!raid?.created_by) return;
+
+    const client = getClient();
+    if (!_ready) return;
+
+    const leadUser = await client.users.fetch(String(raid.created_by)).catch(() => null);
+    if (!leadUser) return;
+
+    const when = raid.datetime ? `\`${raid.datetime}\`` : "`tba`";
+    const title = raid.title || `Raid #${raid.id}`;
+
+    const lines = items.map((s) => {
+      if (s.character_id) {
+        const ch = getCharacter(s.character_id);
+        const chTxt = ch ? `${ch.name} (${ch.class}${ch.spec ? `/${ch.spec}` : ""})` : `Char#${s.character_id}`;
+        return `• ${mention(byUserId)} — **${chTxt}** als **${(s.role || "").toUpperCase()}**`;
+      } else if (s.role === "lootbuddy") {
+        return `• ${mention(byUserId)} — **Lootbuddy** (${s.signup_class || "?"})`;
+      }
+      return `• ${mention(byUserId)} — **${(s.role || "signup").toUpperCase()}**`;
+    });
+
+    const msg =
+      `**Abmeldung (PICKED)**\n` +
+      `Raid: **${title}** ${when}\n` +
+      `Von: ${mention(byUserId)}\n` +
+      `${lines.join("\n")}\n` +
+      (reason ? `**Grund:** ${reason}` : "");
+
+    await leadUser.send({ content: msg }).catch(() => null);
+  } catch (e) {
+    console.warn("notifyRaidleadPickedUnsign:", e?.message || e);
+  }
 }
 
 /* =============================================================================
@@ -475,7 +584,7 @@ export async function deleteGuildChannel(channelId) {
 }
 
 /* =============================================================================
-   Interactions (Buttons, Selects, Modals)
+   Interactions
 ============================================================================= */
 
 function wireUpInteractions(client) {
@@ -488,13 +597,14 @@ function wireUpInteractions(client) {
         if (!raidId || !key?.startsWith("raid-")) return;
 
         if (key === "raid-signup") {
-          const rows = getUserCharacters(interaction.user.id);
+          const allChars = getUserCharacters(interaction.user.id);
 
-          // 🚫 NEU: Charaktere filtern, die bereits gepickt sind (in diesem Raid ODER im aktuellen Mi–Di-Cycle)
-          const availableRows = rows.filter((c) => {
+          // verfügbare Chars: nicht gepickt (hier/zyklus) und noch nicht in diesem Raid angemeldet
+          const availableRows = allChars.filter((c) => {
             try {
               if (isAlreadyPickedHere(raidId, c.id)) return false;
-              if (isCharLockedForCycle(raidId, c.id)) return false;
+              if (isCharLockedForCycle(raidId, c.id)) return false; // ← jetzt "pro Schwierigkeit"
+              if (hasSignupInRaid(raidId, c.id, interaction.user.id)) return false;
               return true;
             } catch { return true; }
           });
@@ -502,7 +612,7 @@ function wireUpInteractions(client) {
           if (!availableRows.length) {
             await interaction.reply({
               ephemeral: true,
-              content: "❌ Du hast aktuell keinen verfügbaren Charakter (bereits gepickt in diesem Raid oder im Mi–Di-Cycle).",
+              content: "❌ Du hast aktuell keinen **verfügbaren** Charakter (bereits angemeldet/gepickt in dieser Schwierigkeit oder im Raid).",
             });
             return;
           }
@@ -519,6 +629,7 @@ function wireUpInteractions(client) {
                 value: String(c.id),
               }))
             );
+
           await interaction.reply({
             ephemeral: true,
             content: "Wähle den Charakter für die Anmeldung:",
@@ -534,6 +645,7 @@ function wireUpInteractions(client) {
             .setMinValues(1)
             .setMaxValues(1)
             .addOptions(CLASS_LIST.map((cls) => ({ label: cls, value: cls })));
+
           await interaction.reply({
             ephemeral: true,
             content: "Lootbuddy-Anmeldung: Wähle deine Klasse:",
@@ -543,10 +655,45 @@ function wireUpInteractions(client) {
         }
 
         if (key === "raid-unsign") {
-          await interaction.deferReply({ ephemeral: true });
-          await removeSignup(raidId, interaction.user.id);
-          await updateRaidMessage(raidId).catch(() => {});
-          await interaction.editReply({ content: "✅ Du wurdest vom Raid abgemeldet." });
+          // Liste ALLER eigenen Signups (inkl. gepickter) – Mehrfachauswahl erlaubt
+          const list = listUserSignupsForRaid(raidId, interaction.user.id, { onlyUnpicked: false });
+
+          if (!list.length) {
+            await interaction.reply({ ephemeral: true, content: "ℹ️ Du hast keine Anmeldungen für diesen Raid." });
+            return;
+          }
+
+          const options = list.slice(0, 25).map((s) => {
+            let label = "";
+            if (s.character_id) {
+              const ch = getCharacter(s.character_id);
+              label = ch ? `${ch.name} (${ch.class}${ch.spec ? `/${ch.spec}` : ""})` : `Char#${s.character_id}`;
+            } else if (s.role === "lootbuddy") {
+              label = `Lootbuddy (${s.signup_class || "?"})`;
+            } else {
+              label = `${s.role || "signup"} (#${s.id})`;
+            }
+            if (Number(s.picked) === 1) label += " [PICKED]";
+
+            return {
+              label,
+              description: s.role ? `Rolle: ${s.role}` : undefined,
+              value: String(s.id), // signup-id
+            };
+          });
+
+          const menu = new StringSelectMenuBuilder()
+            .setCustomId(`raid-unsign-choose:${raidId}`)
+            .setPlaceholder("Wähle Anmeldungen zum Abmelden … (PICKED erfordert Grund)")
+            .setMinValues(1)
+            .setMaxValues(Math.min(25, options.length))
+            .addOptions(options);
+
+          await interaction.reply({
+            ephemeral: true,
+            content: "Wähle die Anmeldungen, die du entfernen möchtest:",
+            components: [new ActionRowBuilder().addComponents(menu)],
+          });
           return;
         }
 
@@ -563,13 +710,16 @@ function wireUpInteractions(client) {
           const characterId = Number(interaction.values?.[0]) || null;
           if (!raidId || !characterId) return;
 
-          // NEU: Block, wenn schon gepickt (im Raid oder Cycle)
           if (isAlreadyPickedHere(raidId, characterId)) {
             await interaction.update({ content: "❌ Dieser Charakter ist in **diesem Raid** bereits gepickt.", components: [] });
             return;
           }
           if (isCharLockedForCycle(raidId, characterId)) {
-            await interaction.update({ content: "❌ Dieser Charakter ist im aktuellen **Cycle (Mi–Di)** bereits gepickt.", components: [] });
+            await interaction.update({ content: "❌ Dieser Charakter ist im aktuellen **Cycle in dieser Schwierigkeit** bereits gepickt.", components: [] });
+            return;
+          }
+          if (hasSignupInRaid(raidId, characterId, interaction.user.id)) {
+            await interaction.update({ content: "❌ Dieser Charakter ist in diesem Raid bereits **angemeldet**.", components: [] });
             return;
           }
 
@@ -593,7 +743,7 @@ function wireUpInteractions(client) {
           return;
         }
 
-        // Booster-Rolle -> Saved/Unsaved (danach Notiz-Modal)
+        // Booster-Rolle -> Saved/Unsaved
         if (id.startsWith("raid-choose-role:")) {
           const [, raidIdStr, charIdStr] = id.split(":");
           const raidId = Number(raidIdStr);
@@ -617,7 +767,7 @@ function wireUpInteractions(client) {
           return;
         }
 
-        // Booster-Saved gewählt -> Notiz-Modal anzeigen
+        // Booster-Saved gewählt -> Notiz-Modal
         if (id.startsWith("raid-choose-saved:")) {
           const [, raidIdStr, charIdStr, roleValue] = id.split(":");
           const raidId = Number(raidIdStr);
@@ -664,13 +814,64 @@ function wireUpInteractions(client) {
           await interaction.showModal(modal);
           return;
         }
+
+        // Abmelden: Auswahl der Einträge → evtl. Grund abfragen, wenn (mind.) 1 picked
+        if (id.startsWith("raid-unsign-choose:")) {
+          const raidId = Number(id.split(":")[1]);
+          const selected = (interaction.values || []).map((v) => Number(v)).filter(Boolean);
+          if (!selected.length) {
+            await interaction.update({ content: "Keine Auswahl getroffen.", components: [] });
+            return;
+          }
+
+          // Prüfen, ob gepickte dabei sind
+          let hasPicked = false;
+          try {
+            const placeholders = selected.map(() => "?").join(",");
+            const rows = db.prepare(
+              `SELECT picked FROM signups WHERE id IN (${placeholders}) AND user_id=?`
+            ).all(...selected, interaction.user.id);
+            hasPicked = rows.some((r) => Number(r.picked) === 1);
+          } catch {}
+
+          if (hasPicked) {
+            // Grund via Modal abfragen
+            const modal = new ModalBuilder()
+              .setCustomId(`raid-unsign-reason:${raidId}:${selected.join(",")}`)
+              .setTitle("Grund für Abmeldung (Pflicht bei PICKED)");
+
+            const reason = new TextInputBuilder()
+              .setCustomId("reason")
+              .setLabel("Bitte Grund angeben")
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(true)
+              .setMaxLength(500);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(reason));
+            await interaction.showModal(modal);
+            return;
+          }
+
+          // Keine gepickten → direkt löschen
+          let removed = 0;
+          for (const sid of selected) {
+            if (deleteSignupById(Number(sid), interaction.user.id)) removed++;
+          }
+
+          await updateRaidMessage(raidId).catch(() => {});
+          await interaction.update({
+            content: `✅ ${removed} Anmeldung(en) entfernt.`,
+            components: [],
+          });
+          return;
+        }
       }
 
-      // ---------- Modal-Submit (Notizen) ----------
+      // ---------- Modal-Submit ----------
       if (interaction.isModalSubmit()) {
         const id = String(interaction.customId || "");
 
-        // Booster-Modal (mit Failsafe-Guards)
+        // Booster-Modal
         if (id.startsWith("raid-note:")) {
           const [, raidIdStr, charIdStr, roleValue, savedValue] = id.split(":");
           const raidId = Number(raidIdStr);
@@ -679,13 +880,16 @@ function wireUpInteractions(client) {
 
           await interaction.deferReply({ ephemeral: true });
 
-          // Failsafe: nochmal blocken, falls erster Guard umgangen
           if (isAlreadyPickedHere(raidId, characterId)) {
             await interaction.editReply({ content: "❌ Dieser Charakter ist in **diesem Raid** bereits gepickt." });
             return;
           }
           if (isCharLockedForCycle(raidId, characterId)) {
-            await interaction.editReply({ content: "❌ Dieser Charakter ist im aktuellen **Cycle (Mi–Di)** bereits gepickt." });
+            await interaction.editReply({ content: "❌ Dieser Charakter ist im aktuellen **Cycle in dieser Schwierigkeit** bereits gepickt." });
+            return;
+          }
+          if (hasSignupInRaid(raidId, characterId, interaction.user.id)) {
+            await interaction.editReply({ content: "❌ Dieser Charakter ist in diesem Raid bereits **angemeldet**." });
             return;
           }
 
@@ -726,6 +930,43 @@ function wireUpInteractions(client) {
           await interaction.editReply({
             content: `✅ Als **Lootbuddy (${cls})** angemeldet.`,
           });
+          return;
+        }
+
+        // ❗ UNSIGN-GRUND (für gepickte Signups) + Benachrichtigung an Raidlead
+        if (id.startsWith("raid-unsign-reason:")) {
+          const [, raidIdStr, idsStr] = id.split(":");
+          const raidId = Number(raidIdStr);
+          const selectedIds = idsStr.split(",").map((x) => Number(x)).filter(Boolean);
+          const reason = (interaction.fields.getTextInputValue("reason") || "").trim();
+
+          await interaction.deferReply({ ephemeral: true });
+
+          // Hol Details der ausgewählten Signups und filtere nur picked für Benachrichtigung
+          const entries = getSignupsByIds(selectedIds, interaction.user.id);
+          const pickedEntries = entries.filter((e) => Number(e.picked) === 1);
+
+          // Grund protokollieren (in note mitschreiben), dann löschen
+          try {
+            const suffix = ` | [UNSIGN] ${reason}`;
+            const stmt = db.prepare(`UPDATE signups SET note=COALESCE(note,'') || ? WHERE id=? AND user_id=?`);
+            for (const sid of selectedIds) {
+              try { stmt.run(suffix, sid, interaction.user.id); } catch {}
+            }
+          } catch {}
+
+          let removed = 0;
+          for (const sid of selectedIds) {
+            if (deleteSignupById(Number(sid), interaction.user.id)) removed++;
+          }
+
+          // Raidlead benachrichtigen (nur wenn es gepickte darunter gab)
+          if (pickedEntries.length > 0) {
+            await notifyRaidleadPickedUnsign(raidId, interaction.user.id, pickedEntries, reason);
+          }
+
+          await updateRaidMessage(raidId).catch(() => {});
+          await interaction.editReply({ content: `✅ ${removed} Anmeldung(en) mit Grund entfernt.` });
           return;
         }
       }
