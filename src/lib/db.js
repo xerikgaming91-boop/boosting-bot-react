@@ -31,7 +31,7 @@ function ensureColumn(table, col, typeSql, defaultSql = null) {
     }
   }
 }
-function ensureIndex(name, sql) { try { db.prepare(sql).run(); } catch {} }
+function ensureIndex(_name, sql) { try { db.prepare(sql).run(); } catch {} }
 function cleanupSignupDuplicates() {
   try {
     db.exec(`
@@ -134,32 +134,44 @@ CREATE TABLE IF NOT EXISTS signups (
   ensureColumn('raids', 'created_at', 'TEXT', `'${now()}'`);
   ensureColumn('raids', 'updated_at', 'TEXT', `'${now()}'`);
 
-  // signups
+  // signups (Basis)
   ensureColumn('signups', 'created_at', 'TEXT', `'${now()}'`);
   ensureColumn('signups', 'updated_at', 'TEXT', `'${now()}'`);
   ensureColumn('signups', 'picked', 'INTEGER', '0');
   ensureColumn('signups', 'status', 'TEXT', `'signed'`);
   ensureColumn('signups', 'role', 'TEXT', 'NULL');
   ensureColumn('signups', 'slot', 'TEXT', 'NULL');
-
-  // 🔹 Zusatzspalten für die neuen Anforderungen:
-  ensureColumn('signups', 'saved', 'TEXT', `'unsaved'`);
   ensureColumn('signups', 'note', 'TEXT', 'NULL');
-  ensureColumn('signups', 'loot_class', 'TEXT', 'NULL');
+  ensureColumn('signups', 'signup_class', 'TEXT', 'NULL');
 
+  // --- Wechsel: saved -> lockout ---
+  // 1) lockout-Spalte sicherstellen
+  ensureColumn('signups', 'lockout', 'TEXT', `'unsaved'`);
+
+  // 2) Falls noch alte 'saved'-Spalte existiert → Werte übernehmen
+  if (hasColumn('signups', 'saved')) {
+    try {
+      db.exec(`
+        UPDATE signups
+           SET lockout = COALESCE(lockout, saved)
+         WHERE saved IS NOT NULL;
+      `);
+    } catch {}
+    // Versuch, alte Spalte zu droppen (wenn SQLite-Version es kann)
+    try { db.exec(`ALTER TABLE signups DROP COLUMN saved;`); } catch {}
+  }
+
+  // Aufräumen/Indizes
   cleanupSignupDuplicates();
 
-  // Ein Char nur einmal pro Raid anmelden
   ensureIndex('idx_signups_raid_char',
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_signups_raid_char ON signups(raid_id, character_id)`);
 
-  // Pro Raid & User max. EIN Pick (Exklusivität innerhalb eines Raids für den User)
   ensureIndex('idx_one_pick_user_raid',
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pick_user_raid
      ON signups(raid_id, user_id)
      WHERE picked=1`);
 
-  // Praktische Indizes
   ensureIndex('idx_chars_user', `CREATE INDEX IF NOT EXISTS idx_chars_user ON characters(user_id)`);
   ensureIndex('idx_raids_time', `CREATE INDEX IF NOT EXISTS idx_raids_time ON raids(datetime)`);
   ensureIndex('idx_signups_raid', `CREATE INDEX IF NOT EXISTS idx_signups_raid ON signups(raid_id)`);
@@ -303,7 +315,7 @@ export const Signups = {
     `).all(raid_id);
   },
 
-  // kompatibler Helper (falls der Bot ihn nutzt)
+  // kompatibler Helper (bot.js nutzt ihn)
   listByRaid(raid_id) {
     return db.prepare(`SELECT * FROM signups WHERE raid_id=? ORDER BY created_at ASC, id ASC`).all(raid_id);
   },
@@ -379,12 +391,10 @@ export const Signups = {
     return new Set(rows.map(r => r.character_id));
   },
 
-  // Kompat: true, wenn Char irgendwo anders bereits gepickt ist und für Ziel-Raid blockt
   isCharPickedElsewhere(character_id, raid_id) {
     return this.isCharLockedForRaid(raid_id, character_id);
   },
 
-  // Wenn ein Char gepickt wird: offene Anmeldungen dieses Chars in anderen passenden Raids entfernen
   withdrawCharElsewhere(character_id, exceptRaidId) {
     const raids = db.prepare(`
       SELECT DISTINCT raid_id FROM signups
@@ -407,7 +417,7 @@ export const Signups = {
 
   create(payload) {
     const st = db.prepare(`
-      INSERT INTO signups (raid_id, user_id, character_id, role, slot, status, picked, saved, note, loot_class, created_at, updated_at)
+      INSERT INTO signups (raid_id, user_id, character_id, role, slot, status, picked, lockout, note, signup_class, created_at, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?, ?, ?)
     `);
     const info = st.run(
@@ -418,9 +428,9 @@ export const Signups = {
       payload.slot || null,
       payload.status || 'signed',
       payload.picked ? 1 : 0,
-      payload.saved || 'unsaved',
+      payload.lockout || 'unsaved',            // ← lockout statt saved
       payload.note || null,
-      payload.loot_class || null,
+      payload.signup_class || null,            // nur signup_class
       now(), now()
     );
     return { id: info.lastInsertRowid };
@@ -436,7 +446,6 @@ export const Signups = {
       .run(flag ? 1 : 0, now(), id);
   },
 
-  // Exklusiv-Pick pro Raid & User
   setExclusivePick(raid_id, user_id, signup_id) {
     const tx = db.transaction(() => {
       db.prepare(`UPDATE signups SET picked=0, updated_at=? WHERE raid_id=? AND user_id=?`)
@@ -451,7 +460,6 @@ export const Signups = {
     db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=?`).run(raid_id, user_id);
   },
 
-  // optional, falls im Bot benutzt:
   withdrawUserAll(raid_id, user_id) {
     db.prepare(`DELETE FROM signups WHERE raid_id=? AND user_id=?`).run(raid_id, user_id);
   }

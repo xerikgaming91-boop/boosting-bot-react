@@ -104,7 +104,6 @@ function rolesForClass(cls) {
   return map[cls] || ["DPS"];
 }
 
-// Lootbuddy priorisiert – nie in DPS/Healer/Tank
 function bucketForRole(role) {
   const r = String(role || "").toLowerCase();
   if (r === "lootbuddy" || r === "lb" || r === "lootbuddies") return "lootbuddies";
@@ -156,10 +155,10 @@ function signupsColumns() {
     hasCharId: cols.includes("character_id") || cols.includes("char_id"),
     charCol: cols.includes("character_id") ? "character_id" : (cols.includes("char_id") ? "char_id" : null),
     charNotNull: !!(charInfo && charInfo.notnull === 1),
-    hasLootClass: cols.includes("loot_class"),
+    hasSignupClass: cols.includes("signup_class"),
     hasNote: cols.includes("note"),
     hasRole: cols.includes("role"),
-    hasSaved: cols.includes("saved"),
+    hasLockout: cols.includes("lockout"),   // ← NEU statt saved
     hasPicked: cols.includes("picked"),
     hasStatus: cols.includes("status"),
     hasCreatedAt: cols.includes("created_at"),
@@ -168,17 +167,15 @@ function signupsColumns() {
 }
 
 /* =============================================================================
-   WICHTIG: zentrales Upsert – Klasse IMMER schreiben
-   - Booster: Klasse aus Character übernehmen (falls nicht mitgegeben)
-   - Lootbuddy: Klasse kommt aus Dropdown, characterId = null
+   ZENTRALES UPSERT – schreibt ausschließlich in signup_class + lockout
 ============================================================================= */
-async function upsertSignup({ raidId, userId, characterId, role, saved, lootClass, note }) {
+async function upsertSignup({ raidId, userId, characterId, role, saved, signupClass, note }) {
   const c = signupsColumns();
 
-  // Booster → Klasse automatisch vom Character übernehmen (wenn nicht gesetzt)
-  if (!lootClass && characterId != null) {
+  // Booster → Klasse automatisch vom Character übernehmen (wenn nicht mitgegeben)
+  if (!signupClass && characterId != null) {
     const ch = getCharacter(characterId);
-    if (ch?.class) lootClass = ch.class;
+    if (ch?.class) signupClass = ch.class;
   }
 
   // idempotent pro raid+user
@@ -193,8 +190,8 @@ async function upsertSignup({ raidId, userId, characterId, role, saved, lootClas
     fields.push(c.charCol); values.push(value); placeholders.push("?");
   }
   if (c.hasRole && role != null) { fields.push("role"); values.push(role); placeholders.push("?"); }
-  if (c.hasSaved && saved != null) { fields.push("saved"); values.push(saved); placeholders.push("?"); }
-  if (c.hasLootClass) { fields.push("loot_class"); values.push(lootClass || null); placeholders.push("?"); }
+  if (c.hasLockout && saved != null) { fields.push("lockout"); values.push(saved); placeholders.push("?"); } // saved → lockout
+  if (c.hasSignupClass) { fields.push("signup_class"); values.push(signupClass || null); placeholders.push("?"); }
   if (c.hasNote) { fields.push("note"); values.push(note || ""); placeholders.push("?"); }
   if (c.hasPicked) { fields.push("picked"); values.push(0); placeholders.push("?"); }
   if (c.hasStatus) { fields.push("status"); values.push("open"); placeholders.push("?"); }
@@ -217,8 +214,8 @@ function groupSignups(signups) {
   const buckets = { tanks: [], healers: [], dps: [], lootbuddies: [] };
   for (const s of signups) {
     const bucket = bucketForRole(s.role);
-    const label = s.role === "lootbuddy" && s.loot_class
-      ? `${mention(s.user_id)} (${s.loot_class})`
+    const label = s.role === "lootbuddy" && s.signup_class
+      ? `${mention(s.user_id)} (${s.signup_class})`
       : mention(s.user_id);
     buckets[bucket].push(label);
   }
@@ -262,7 +259,7 @@ async function buildSignupsEmbed(raidId) {
     .setFooter({ text: `RID:${raidId}` });
 }
 
-// Roster (nur gepickte) – falls kein 'picked'-Feld vorhanden, leeres Roster
+// Roster (nur gepickte)
 async function buildRosterEmbed(raidId) {
   let rows = [];
   try {
@@ -295,12 +292,10 @@ function buildButtons(raidId) {
   ];
 }
 
-// (Alt) einfaches Top-Embed; für volle Nachricht bitte buildRaidMessageFull nutzen.
 function buildRaidMessage(raid) {
   return { embeds: [buildTopEmbed(raid)], components: buildButtons(raid.id) };
 }
 
-// ✅ Volle Nachricht (Top + Roster + Signups)
 async function buildRaidMessageFull(raid) {
   return {
     embeds: [
@@ -316,7 +311,7 @@ async function buildRaidMessageFull(raid) {
    Public API: Channel & Messages
 ============================================================================= */
 
-export async function createRaidChannel(raid, opts = {}) {
+export async function createRaidChannel(raid) {
   const client = getClient();
   if (!_ready) throw new Error("Bot nicht ready");
 
@@ -330,16 +325,13 @@ export async function createRaidChannel(raid, opts = {}) {
     name,
     type: ChannelType.GuildText,
     parent: parentId || undefined,
-    permissionOverwrites: [
-      // Sichtbarkeit/Permissions ggf. hier pflegen
-    ],
+    permissionOverwrites: [],
   });
 
   await ensureRaidMessageFirstPost(chan, raid);
   return chan.id;
 }
 
-// Nie reposten – vorhandene Message wird gesucht/editiert
 export async function updateRaidMessage(raidId) {
   try {
     const raid = await Raids.get(raidId);
@@ -351,13 +343,11 @@ export async function updateRaidMessage(raidId) {
     const channel = await client.channels.fetch(raid.channel_id).catch(() => null);
     if (!channel) return;
 
-    // 1) vorhandene Nachricht über message_id laden
     let msg = null;
     if (raid.message_id) {
       msg = await channel.messages.fetch(raid.message_id).catch(() => null);
     }
 
-    // 2) Fallback: Suche im Kanal (per RID im Embed-Footer)
     if (!msg) {
       const fetched = await channel.messages.fetch({ limit: 50 }).catch(() => null);
       if (fetched) {
@@ -372,7 +362,6 @@ export async function updateRaidMessage(raidId) {
 
     const payload = await buildRaidMessageFull(raid);
 
-    // 3) Edit, oder wenn gar nichts existiert → neu posten
     if (msg) {
       await msg.edit({ ...payload, allowedMentions: { parse: ["users"] } });
     } else {
@@ -384,7 +373,6 @@ export async function updateRaidMessage(raidId) {
   }
 }
 
-// ✅ Fix: im Raid-Channel posten (falls vorhanden), volle Embeds nutzen
 export async function postRaidAnnouncement(raid) {
   const client = getClient();
   if (!_ready) return;
@@ -407,7 +395,6 @@ export async function publishRoster(raidId) {
   const ch = await client.channels.fetch(raid.channel_id).catch(() => null);
   if (!ch) return;
 
-  // gepickte anzeigen, falls vorhanden – sonst leer
   let rows = [];
   try {
     const cols = signupsColumns();
@@ -544,7 +531,7 @@ function wireUpInteractions(client) {
           return;
         }
 
-        // Booster-Rolle -> Saved/Unsaved
+        // Booster-Rolle -> Saved/Unsaved (+ optionale Notiz)
         if (id.startsWith("raid-choose-role:")) {
           const [, raidIdStr, charIdStr] = id.split(":");
           const raidId = Number(raidIdStr);
@@ -562,27 +549,28 @@ function wireUpInteractions(client) {
             ]);
 
           await interaction.update({
-            content: `Rolle: **${role.toUpperCase()}**\nBist du **Saved**?`,
+            content: `Rolle: **${role.toUpperCase()}**\nBist du **Saved**? (optional wird eine Notiz gespeichert)`,
             components: [new ActionRowBuilder().addComponents(savedMenu)],
           });
           return;
         }
 
-        // Booster-Saved speichern (Klasse wird in upsertSignup automatisch ergänzt)
+        // Booster-Saved speichern (→ lockout in DB; Klasse auto aus Char → signup_class)
         if (id.startsWith("raid-choose-saved:")) {
           const [, raidIdStr, charIdStr, roleValue] = id.split(":");
           const raidId = Number(raidIdStr);
           const characterId = Number(charIdStr);
           const saved = String(interaction.values?.[0] || "unsaved");
+
           const note = `role=${roleValue};saved=${saved}`;
 
           await upsertSignup({
             raidId,
             userId: interaction.user.id,
-            characterId,          // Booster mit Char
-            role: roleValue,      // tank/healer/dps
-            saved,
-            lootClass: null,      // → wird in upsertSignup automatisch vom Character gesetzt
+            characterId,
+            role: roleValue,
+            saved,                 // bleibt als Variable bestehen
+            signupClass: null,     // wird in upsertSignup automatisch vom Char gesetzt
             note,
           });
 
@@ -603,10 +591,10 @@ function wireUpInteractions(client) {
           await upsertSignup({
             raidId,
             userId: interaction.user.id,
-            characterId: null,    // KEIN Character!
+            characterId: null,
             role: "lootbuddy",
-            saved: "unsaved",     // immer unsaved
-            lootClass: cls,       // → Klasse direkt aus Auswahl
+            saved: "unsaved",      // wird als lockout gespeichert
+            signupClass: cls,
             note: "lootbuddy",
           });
 
