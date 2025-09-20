@@ -88,6 +88,21 @@ const CLASS_LIST = [
   "Druid","Demon Hunter","Evoker"
 ];
 
+// ✅ Server-Emoji IDs
+const EMOJI = {
+  dps: "<:dps:1410398124090064957>",
+  tank: "<:tank:1410398280679952484>",
+  heal: "<:heal:1410398229832667177>",
+  loot: "<:Loothsare:1418723379510509610>",
+};
+
+// Klassen-Emoji: z.B. "Death Knight" → ":DeathKnight:"
+function classEmoji(cls) {
+  if (!cls) return "";
+  const token = String(cls).replace(/\s+/g, "");
+  return `:${token}:`;
+}
+
 function rolesForClass(cls) {
   const map = {
     Warrior: ["Tank","DPS"],
@@ -201,11 +216,7 @@ function isAlreadyPickedHere(raidId, characterId) {
   } catch { return false; }
 }
 
-/**
- * 🔁 NEU: Cycle-Lock gilt **pro Schwierigkeit**.
- * Wenn der Charakter im aktuellen Mi→Di-Zeitraum bereits in **derselben Schwierigkeit**
- * gepickt ist, blockieren wir. Andere Schwierigkeiten bleiben erlaubt.
- */
+// pro Schwierigkeit sperren
 function isCharLockedForCycle(raidId, characterId) {
   try {
     const raid = Raids.get ? Raids.get(raidId) : db.prepare(`SELECT * FROM raids WHERE id=?`).get(raidId);
@@ -215,7 +226,6 @@ function isCharLockedForCycle(raidId, characterId) {
     const cols = signupsColumns();
     if (!cols.hasCharId || !cols.hasPicked) return false;
 
-    // nur gleiche Schwierigkeit sperren
     const rows = db.prepare(
       `SELECT r.id AS raid_id
          FROM signups s
@@ -337,22 +347,34 @@ function deleteSignupById(signupId, userId) {
    Grouping & Embeds
 ============================================================================= */
 
+// ⚙️ Eintrag zusammenbauen (mit Klassen-Emoji)
+function renderEntry(s) {
+  let cls = null;
+
+  if (s.role === "lootbuddy") {
+    cls = s.signup_class || null;
+  } else if (s.character_id) {
+    const ch = getCharacter(s.character_id);
+    cls = ch?.class || null;
+  }
+
+  const clsEmoji = cls ? ` ${classEmoji(cls)}` : "";
+  return `${mention(s.user_id)}${clsEmoji}`;
+}
+
 function groupSignups(signups) {
   const buckets = { tanks: [], healers: [], dps: [], lootbuddies: [] };
   for (const s of signups) {
     const bucket = bucketForRole(s.role);
-    const label = s.role === "lootbuddy" && s.signup_class
-      ? `${mention(s.user_id)} (${s.signup_class})`
-      : mention(s.user_id);
-    buckets[bucket].push(label);
+    buckets[bucket].push(renderEntry(s));
   }
   return buckets;
 }
 
-function fieldFor(title, arr) {
-  const count = arr.length;
-  const value = count ? arr.join("\n") : "keine";
-  return { name: `${title} **(${count})**`, value, inline: true };
+// Titelzeile mit Gesamtsumme, Felder ohne (x)
+function fieldForNoCount(labelEmoji, arr) {
+  const value = arr.length ? arr.join("\n") : "keine";
+  return { name: labelEmoji, value, inline: true };
 }
 
 function buildTopEmbed(raid) {
@@ -376,14 +398,16 @@ async function buildSignupsEmbed(raidId) {
   const all = await getSignups(raidId);
   const unpicked = all.filter((s) => Number(s.picked) !== 1);
   const g = groupSignups(unpicked);
+  const total = unpicked.length;
+
   return new EmbedBuilder()
     .setColor(0x2f3136)
-    .setTitle("Signups")
+    .setTitle(`Signups (${total})`)
     .addFields(
-      fieldFor("🛡️ Tanks", g.tanks),
-      fieldFor("✨ Healers", g.healers),
-      fieldFor("⚔️ DPS", g.dps),
-      fieldFor("💰 Lootbuddies", g.lootbuddies),
+      fieldForNoCount(EMOJI.tank + " Tanks", g.tanks),
+      fieldForNoCount(EMOJI.heal + " Healers", g.healers),
+      fieldForNoCount(EMOJI.dps + " DPS", g.dps),
+      fieldForNoCount(EMOJI.loot + " Lootbuddies", g.lootbuddies),
     )
     .setFooter({ text: `RID:${raidId}` });
 }
@@ -399,14 +423,16 @@ async function buildRosterEmbed(raidId) {
   } catch {}
 
   const g = groupSignups(rows);
+  const total = rows.length;
+
   return new EmbedBuilder()
     .setColor(0x2f3136)
-    .setTitle("Roster (geplant)")
+    .setTitle(`Roster (${total})`)
     .addFields(
-      fieldFor("🛡️ Tanks", g.tanks),
-      fieldFor("✨ Healers", g.healers),
-      fieldFor("⚔️ DPS", g.dps),
-      fieldFor("💰 Lootbuddies", g.lootbuddies),
+      fieldForNoCount(EMOJI.tank + " Tanks", g.tanks),
+      fieldForNoCount(EMOJI.heal + " Healers", g.healers),
+      fieldForNoCount(EMOJI.dps + " DPS", g.dps),
+      fieldForNoCount(EMOJI.loot + " Lootbuddies", g.lootbuddies),
     )
     .setFooter({ text: `RID:${raidId}` });
 }
