@@ -325,7 +325,6 @@ export const Signups = {
     return new Set(rows.map((r) => r.character_id));
   },
 
-  // Alle gepickten Char-IDs (global)
   lockedCharIdsGlobal(excludeRaidId = null) {
     const rows = db.prepare(`
       SELECT character_id, raid_id
@@ -340,12 +339,11 @@ export const Signups = {
     return locked;
   },
 
-  // ---- NEU: Char für *diesen* Raid gesperrt? (Cycle+Schwierigkeit, nur unsaved/vip)
   isCharLockedForRaid(raid_id, character_id) {
     const target = Raids.get(raid_id);
     if (!target) return false;
     const loot = String(target.loot_type || '').toLowerCase();
-    if (!BLOCKING_LOOT.has(loot)) return false; // saved/community blocken nicht
+    if (!BLOCKING_LOOT.has(loot)) return false;
 
     const dt = parseDbDate(target.datetime) || new Date();
     const s = fmtDateTime(startOfCycle(dt));
@@ -367,12 +365,11 @@ export const Signups = {
     return !!row;
   },
 
-  // Für UI-Filter: Alle gesperrten Char-IDs (bezogen auf Ziel-Raid)
   lockedCharIdsForRaid(raid_id) {
     const target = Raids.get(raid_id);
     if (!target) return new Set();
     const loot = String(target.loot_type || '').toLowerCase();
-    if (!BLOCKING_LOOT.has(loot)) return new Set(); // nix zu sperren
+    if (!BLOCKING_LOOT.has(loot)) return new Set();
 
     const dt = parseDbDate(target.datetime) || new Date();
     const s = fmtDateTime(startOfCycle(dt));
@@ -428,9 +425,9 @@ export const Signups = {
       payload.slot || null,
       payload.status || 'signed',
       payload.picked ? 1 : 0,
-      payload.lockout || 'unsaved',            // ← lockout statt saved
+      payload.lockout || 'unsaved',
       payload.note || null,
-      payload.signup_class || null,            // nur signup_class
+      payload.signup_class || null,
       now(), now()
     );
     return { id: info.lastInsertRowid };

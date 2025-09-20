@@ -292,7 +292,8 @@ export async function startServer() {
       const title=buildAutoTitle({ datetime, difficulty, loot_type });
       const updated = Raids.update({ ...exist, title, datetime, difficulty, loot_type, description: description||"", created_by: ownerId });
 
-      try { await updateRaidMessage(id); await publishRoster(id); } catch(e){ console.warn("⚠️ updateRaidMessage/publishRoster:", e?.message||e); }
+      // Nur Embed aktualisieren, KEIN Roster-Post
+      try { await updateRaidMessage(id); /* await publishRoster(id); */ } catch(e){ console.warn("⚠️ updateRaidMessage:", e?.message||e); }
 
       res.json({ ok:true, data: attachLead(updated) });
     } catch(e){
@@ -375,13 +376,15 @@ export async function startServer() {
             )
           `).run(s.character_id, s.raid_id, diff, sC, eC);
 
-          for (const rid of affected) { try { await updateRaidMessage(rid); await publishRoster(rid); } catch{} }
+          // Nur Embed aktualisieren in den betroffenen Raids
+          for (const rid of affected) { try { await updateRaidMessage(rid); /* await publishRoster(rid); */ } catch{} }
         }
       } else {
         Signups.setPicked(s.id, 0);
       }
 
-      try { await updateRaidMessage(s.raid_id); await publishRoster(s.raid_id); } catch {}
+      // Nur Embed aktualisieren, KEIN Roster-Post
+      try { await updateRaidMessage(s.raid_id); /* await publishRoster(s.raid_id); */ } catch {}
       res.json({ ok:true });
     } catch(e){ res.status(400).json({ ok:false, error:e?.message||"pick_failed" }); }
   });

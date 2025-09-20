@@ -10,6 +10,9 @@ import {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from "discord.js";
 
 import { CONFIG } from "./config.js";
@@ -167,7 +170,7 @@ function signupsColumns() {
 }
 
 /* =============================================================================
-   ZENTRALES UPSERT – schreibt ausschließlich in signup_class + lockout
+   ZENTRALES UPSERT – schreibt ausschließlich in signup_class + lockout + note
 ============================================================================= */
 async function upsertSignup({ raidId, userId, characterId, role, saved, signupClass, note }) {
   const c = signupsColumns();
@@ -192,7 +195,7 @@ async function upsertSignup({ raidId, userId, characterId, role, saved, signupCl
   if (c.hasRole && role != null) { fields.push("role"); values.push(role); placeholders.push("?"); }
   if (c.hasLockout && saved != null) { fields.push("lockout"); values.push(saved); placeholders.push("?"); } // saved → lockout
   if (c.hasSignupClass) { fields.push("signup_class"); values.push(signupClass || null); placeholders.push("?"); }
-  if (c.hasNote) { fields.push("note"); values.push(note || ""); placeholders.push("?"); }
+  if (c.hasNote) { fields.push("note"); values.push(note ?? ""); placeholders.push("?"); }
   if (c.hasPicked) { fields.push("picked"); values.push(0); placeholders.push("?"); }
   if (c.hasStatus) { fields.push("status"); values.push("open"); placeholders.push("?"); }
   if (c.hasCreatedAt) { fields.push("created_at"); values.push(nowSql()); placeholders.push("?"); }
@@ -435,7 +438,7 @@ export async function deleteGuildChannel(channelId) {
 }
 
 /* =============================================================================
-   Interactions (Buttons & Selects)
+   Interactions (Buttons, Selects, Modals)
 ============================================================================= */
 
 function wireUpInteractions(client) {
@@ -531,7 +534,7 @@ function wireUpInteractions(client) {
           return;
         }
 
-        // Booster-Rolle -> Saved/Unsaved (+ optionale Notiz)
+        // Booster-Rolle -> Saved/Unsaved (danach Notiz-Modal)
         if (id.startsWith("raid-choose-role:")) {
           const [, raidIdStr, charIdStr] = id.split(":");
           const raidId = Number(raidIdStr);
@@ -549,37 +552,36 @@ function wireUpInteractions(client) {
             ]);
 
           await interaction.update({
-            content: `Rolle: **${role.toUpperCase()}**\nBist du **Saved**? (optional wird eine Notiz gespeichert)`,
+            content: `Rolle: **${role.toUpperCase()}**\nBist du **Saved**? (danach kannst du eine *optionale* Notiz eingeben)`,
             components: [new ActionRowBuilder().addComponents(savedMenu)],
           });
           return;
         }
 
-        // Booster-Saved speichern (→ lockout in DB; Klasse auto aus Char → signup_class)
+        // Booster-Saved gewählt -> Notiz-Modal anzeigen
         if (id.startsWith("raid-choose-saved:")) {
           const [, raidIdStr, charIdStr, roleValue] = id.split(":");
           const raidId = Number(raidIdStr);
           const characterId = Number(charIdStr);
           const saved = String(interaction.values?.[0] || "unsaved");
 
-          const note = `role=${roleValue};saved=${saved}`;
+          const modal = new ModalBuilder()
+            .setCustomId(`raid-note:${raidId}:${characterId}:${roleValue}:${saved}`)
+            .setTitle("Optionale Notiz");
 
-          await upsertSignup({
-            raidId,
-            userId: interaction.user.id,
-            characterId,
-            role: roleValue,
-            saved,                 // bleibt als Variable bestehen
-            signupClass: null,     // wird in upsertSignup automatisch vom Char gesetzt
-            note,
-          });
+          const noteInput = new TextInputBuilder()
+            .setCustomId("note")
+            .setLabel("Notiz (optional)")
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setMaxLength(200);
 
-          await updateRaidMessage(raidId).catch(() => {});
-          await interaction.update({ content: "✅ Angemeldet.", components: [] });
+          modal.addComponents(new ActionRowBuilder().addComponents(noteInput));
+          await interaction.showModal(modal);
           return;
         }
 
-        // Lootbuddy: Klasse -> direkt speichern (immer unsaved, ohne Character)
+        // Lootbuddy: Klasse -> Notiz-Modal
         if (id.startsWith("raid-choose-lbclass:")) {
           const raidId = Number(id.split(":")[1]);
           const cls = interaction.values?.[0];
@@ -588,20 +590,69 @@ function wireUpInteractions(client) {
             return;
           }
 
+          const modal = new ModalBuilder()
+            .setCustomId(`raid-note-lb:${raidId}:${cls}`)
+            .setTitle("Optionale Notiz (Lootbuddy)");
+
+          const noteInput = new TextInputBuilder()
+            .setCustomId("note")
+            .setLabel("Notiz (optional)")
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setMaxLength(200);
+
+          modal.addComponents(new ActionRowBuilder().addComponents(noteInput));
+          await interaction.showModal(modal);
+          return;
+        }
+      }
+
+      // ---------- Modal-Submit (Notizen) ----------
+      if (interaction.isModalSubmit()) {
+        const id = String(interaction.customId || "");
+
+        // Booster-Modal
+        if (id.startsWith("raid-note:")) {
+          const [, raidIdStr, charIdStr, roleValue, savedValue] = id.split(":");
+          const raidId = Number(raidIdStr);
+          const characterId = Number(charIdStr);
+          const note = interaction.fields.getTextInputValue("note") || null;
+
+          await upsertSignup({
+            raidId,
+            userId: interaction.user.id,
+            characterId,
+            role: roleValue,
+            saved: savedValue,
+            signupClass: null, // wird aus Character übernommen
+            note,
+          });
+
+          await updateRaidMessage(raidId).catch(() => {});
+          await interaction.reply({ ephemeral: true, content: "✅ Angemeldet." });
+          return;
+        }
+
+        // Lootbuddy-Modal
+        if (id.startsWith("raid-note-lb:")) {
+          const [, raidIdStr, cls] = id.split(":");
+          const raidId = Number(raidIdStr);
+          const note = interaction.fields.getTextInputValue("note") || null;
+
           await upsertSignup({
             raidId,
             userId: interaction.user.id,
             characterId: null,
             role: "lootbuddy",
-            saved: "unsaved",      // wird als lockout gespeichert
+            saved: "unsaved",
             signupClass: cls,
-            note: "lootbuddy",
+            note,
           });
 
           await updateRaidMessage(raidId).catch(() => {});
-          await interaction.update({
+          await interaction.reply({
+            ephemeral: true,
             content: `✅ Als **Lootbuddy (${cls})** angemeldet.`,
-            components: [],
           });
           return;
         }
