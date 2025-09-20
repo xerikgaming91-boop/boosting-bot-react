@@ -161,7 +161,7 @@ function signupsColumns() {
     hasSignupClass: cols.includes("signup_class"),
     hasNote: cols.includes("note"),
     hasRole: cols.includes("role"),
-    hasLockout: cols.includes("lockout"),   // ← NEU statt saved
+    hasLockout: cols.includes("lockout"),   // ← statt saved
     hasPicked: cols.includes("picked"),
     hasStatus: cols.includes("status"),
     hasCreatedAt: cols.includes("created_at"),
@@ -170,7 +170,7 @@ function signupsColumns() {
 }
 
 /* =============================================================================
-   ZENTRALES UPSERT – schreibt ausschließlich in signup_class + lockout + note
+   ZENTRALES UPSERT – schreibt in signup_class + lockout + note (ohne Roster-Repost)
 ============================================================================= */
 async function upsertSignup({ raidId, userId, characterId, role, saved, signupClass, note }) {
   const c = signupsColumns();
@@ -193,11 +193,11 @@ async function upsertSignup({ raidId, userId, characterId, role, saved, signupCl
     fields.push(c.charCol); values.push(value); placeholders.push("?");
   }
   if (c.hasRole && role != null) { fields.push("role"); values.push(role); placeholders.push("?"); }
-  if (c.hasLockout && saved != null) { fields.push("lockout"); values.push(saved); placeholders.push("?"); } // saved → lockout
+  if (c.hasLockout && saved != null) { fields.push("lockout"); values.push(saved); placeholders.push("?"); }
   if (c.hasSignupClass) { fields.push("signup_class"); values.push(signupClass || null); placeholders.push("?"); }
   if (c.hasNote) { fields.push("note"); values.push(note ?? ""); placeholders.push("?"); }
   if (c.hasPicked) { fields.push("picked"); values.push(0); placeholders.push("?"); }
-  if (c.hasStatus) { fields.push("status"); values.push("open"); placeholders.push("?"); }
+  if (c.hasStatus) { fields.push("status"); values.push("signed"); placeholders.push("?"); }
   if (c.hasCreatedAt) { fields.push("created_at"); values.push(nowSql()); placeholders.push("?"); }
   if (c.hasUpdatedAt) { fields.push("updated_at"); values.push(nowSql()); placeholders.push("?"); }
 
@@ -247,9 +247,11 @@ function buildTopEmbed(raid) {
     .setFooter({ text: `RID:${raid.id}` });
 }
 
+// ✅ Signups-Embed zeigt NUR ungepickte (picked=0)
 async function buildSignupsEmbed(raidId) {
-  const signups = await getSignups(raidId);
-  const g = groupSignups(signups);
+  const all = await getSignups(raidId);
+  const unpicked = all.filter((s) => Number(s.picked) !== 1); // <-- hier die Filterung
+  const g = groupSignups(unpicked);
   return new EmbedBuilder()
     .setColor(0x2f3136)
     .setTitle("Signups")
@@ -303,8 +305,8 @@ async function buildRaidMessageFull(raid) {
   return {
     embeds: [
       buildTopEmbed(raid),
-      await buildRosterEmbed(raid.id),
-      await buildSignupsEmbed(raid.id),
+      await buildRosterEmbed(raid.id),   // gepickte
+      await buildSignupsEmbed(raid.id),  // ungepickte
     ],
     components: buildButtons(raid.id),
   };
@@ -392,30 +394,9 @@ export async function postRaidAnnouncement(raid) {
 }
 
 export async function publishRoster(raidId) {
-  const raid = await Raids.get(raidId);
-  if (!raid?.channel_id) return;
-  const client = getClient();
-  const ch = await client.channels.fetch(raid.channel_id).catch(() => null);
-  if (!ch) return;
-
-  let rows = [];
-  try {
-    const cols = signupsColumns();
-    if (cols.hasPicked) {
-      rows = db.prepare(`SELECT * FROM signups WHERE raid_id=? AND picked=1 ORDER BY id`).all(raidId);
-    }
-  } catch {}
-
-  const g = groupSignups(rows);
-  const rosterText = [
-    `**Roster (geplant)**`,
-    `🛡️ **Tanks (${g.tanks.length})**\n${g.tanks.join("\n") || "_keine_"}`,
-    `✨ **Healers (${g.healers.length})**\n${g.healers.join("\n") || "_keine_"}`,
-    `⚔️ **DPS (${g.dps.length})**\n${g.dps.join("\n") || "_keine_"}`,
-    `💰 **Lootbuddies (${g.lootbuddies.length})**\n${g.lootbuddies.join("\n") || "_keine_"}`,
-  ].join("\n");
-
-  await ch.send({ content: rosterText, allowedMentions: { parse: ["users"] } });
+  // NICHT automatisch posten – nur die bestehende Nachricht enthält ein Roster-Embed.
+  // (Funktion bleibt für spätere manuelle Nutzung bestehen.)
+  await updateRaidMessage(raidId);
 }
 
 export async function deleteGuildChannel(channelId) {
