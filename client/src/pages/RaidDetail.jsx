@@ -31,12 +31,12 @@ const CLASS_ICON_BASE_PRIMARY = "/icons/classes/";
 const CLASS_ICON_BASE_FALLBACK = "/icons/classes/icons/classes/";
 
 /* ---------------------------------------------------------
-   API Helper – robust gegenüber {ok:true,data} oder {raid,signups}
+   API Helpers
 --------------------------------------------------------- */
 async function apiGet(url) {
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  const json = await res.json();
+  const json = await res.json().catch(() => ({}));
   if (json && typeof json === "object" && "ok" in json) {
     if ("data" in json) return json.data;
     return json;
@@ -54,11 +54,7 @@ async function apiPost(url, body) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}${text ? ` – ${text}` : ""}`);
   }
-  try {
-    return await res.json();
-  } catch {
-    return {};
-  }
+  return res.json().catch(() => ({}));
 }
 
 /* ---------------------------------------------------------
@@ -69,16 +65,10 @@ const firstNonEmpty = (...vals) => {
   return undefined;
 };
 
-/** Klassenname robust normalisieren (DK/DH Aliases etc.) */
 function normalizeClassName(raw) {
   if (!raw) return "";
   const s = String(raw).toLowerCase().trim();
-  if (!s) return "";
-
-  // entferne Sonderzeichen/Spaces für Mapping
   const compact = s.replace(/[\s_-]+/g, "");
-
-  // häufige Aliases
   if (["dk", "deathknight", "deathnight"].includes(compact)) return "deathknight";
   if (["dh", "demonhunter"].includes(compact)) return "demonhunter";
   if (compact === "druid") return "druid";
@@ -92,8 +82,6 @@ function normalizeClassName(raw) {
   if (compact === "shaman") return "shaman";
   if (compact === "warlock") return "warlock";
   if (compact === "warrior") return "warrior";
-
-  // fallback: versuche mit spaces
   if (s === "death knight") return "deathknight";
   if (s === "demon hunter") return "demonhunter";
   return compact;
@@ -119,13 +107,14 @@ const readWclUrl = (row, charMap) => {
   const region = firstNonEmpty(row.char_region, ch?.region, "");
   const realm = firstNonEmpty(row.char_realm, ch?.realm, "");
   const name = firstNonEmpty(row.char_name, ch?.name, "");
-  if (region && realm && name)
+  if (region && realm && name) {
     return `https://www.warcraftlogs.com/character/${region}/${realm}/${name}`;
+  }
   return null;
 };
 
 /* ---------------------------------------------------------
-   UI-Bausteine
+   UI Bestandteile
 --------------------------------------------------------- */
 function RoleTitle({ role, text }) {
   const file = ROLE_ICON_FILE[role];
@@ -149,7 +138,6 @@ function ClassIcon({ klass, size = 20 }) {
   if (!klass) return null;
   const file = CLASS_ICON_FILE[String(klass)];
   if (!file) return null;
-
   const [src, setSrc] = useState(CLASS_ICON_BASE_PRIMARY + file);
   return (
     <img
@@ -164,18 +152,28 @@ function ClassIcon({ klass, size = 20 }) {
   );
 }
 
+/* Buttons */
+const btnBase =
+  "inline-flex items-center justify-center h-7 px-3 rounded-md text-xs font-medium whitespace-nowrap transition-colors focus:outline-none focus:ring-2 focus:ring-offset-0";
+const btnPick = `${btnBase} bg-emerald-600 hover:bg-emerald-500 text-white`;
+const btnUnpick = `${btnBase} bg-rose-600 hover:bg-rose-500 text-white`;
+
+/* Eine Signup-Zeile (overflow-safe) */
 function SignupRow({ s, charMap, onPick, onUnpick }) {
   const isLoot = String(s.role).toLowerCase() === "lootbuddy";
   const klass = readClass(s, charMap);
   const name = readDisplayName(s, charMap);
   const ilvl = isLoot ? null : readIlvl(s, charMap);
   const wcl = isLoot ? null : readWclUrl(s, charMap);
-  const lockout = s.lockout ? String(s.lockout) : "";
+
+  const rawLockout = s.lockout ? String(s.lockout) : "";
+  const isUnsaved = rawLockout.trim().toLowerCase() === "unsaved";
   const note = s.note ? String(s.note) : "";
 
   return (
-    <div className="flex items-center justify-between gap-2 py-0.5 min-w-0">
-      <div className="flex items-center gap-2 min-w-0">
+    <div className="flex items-center justify-between gap-3 py-1 px-2 rounded-md hover:bg-slate-700/25">
+      {/* links */}
+      <div className="flex-1 min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1">
         <ClassIcon klass={klass} size={22} />
         {isLoot ? (
           <span className="truncate">{name}</span>
@@ -192,31 +190,42 @@ function SignupRow({ s, charMap, onPick, onUnpick }) {
         ) : (
           <span className="truncate">{name}</span>
         )}
-        {ilvl ? <span className="ml-1 text-[11px] text-slate-300">• {ilvl} ilvl</span> : null}
-        {lockout ? <span className="ml-1 text-[11px] text-slate-400">• {lockout}</span> : null}
+
+        {/* ilvl */}
+        {ilvl ? <span className="shrink-0 ml-1 text-[11px] text-slate-300">• {ilvl} ilvl</span> : null}
+
+        {/* lockout / 'unsaved' => loot icon */}
+        {rawLockout ? (
+          isUnsaved ? (
+            <img
+              src="/icons/roles/loot.png"
+              width={16}
+              height={16}
+              alt="lootshare"
+              title="lootshare"
+              className="inline-block ml-1 align-[-3px]"
+            />
+          ) : (
+            <span className="shrink-0 ml-1 text-[11px] text-slate-400">• {rawLockout}</span>
+          )
+        ) : null}
+
+        {/* note */}
         {note ? (
-          <span className="ml-1 px-1.5 py-0.5 rounded bg-slate-700/40 text-[11px] text-slate-200">
+          <span className="shrink-0 ml-1 px-1.5 py-0.5 rounded bg-slate-700/40 text-[11px] text-slate-200">
             {note}
           </span>
         ) : null}
       </div>
 
-      {/* Actions */}
-      <div className="flex items-center gap-1 shrink-0">
+      {/* rechts */}
+      <div className="shrink-0">
         {!s.picked ? (
-          <button
-            onClick={() => onPick?.(s)}
-            className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px]"
-            title="In Roster verschieben"
-          >
+          <button onClick={() => onPick?.(s)} className={btnPick} title="In Roster verschieben">
             Pick
           </button>
         ) : (
-          <button
-            onClick={() => onUnpick?.(s)}
-            className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px]"
-            title="Aus Roster entfernen"
-          >
+          <button onClick={() => onUnpick?.(s)} className={btnUnpick} title="Aus Roster entfernen">
             Unpick
           </button>
         )}
@@ -225,9 +234,10 @@ function SignupRow({ s, charMap, onPick, onUnpick }) {
   );
 }
 
+/* Spalte pro Rolle */
 function RoleColumn({ title, role, items, charMap, onPick, onUnpick, emptyText = "keine" }) {
   return (
-    <div className="flex-1 min-w-[260px]">
+    <div className="flex-1 min-w-[380px]">
       <RoleTitle role={role} text={title} />
       <div className="mt-2 space-y-1">
         {items.length === 0 ? (
@@ -237,6 +247,68 @@ function RoleColumn({ title, role, items, charMap, onPick, onUnpick, emptyText =
             <SignupRow key={s.id} s={s} charMap={charMap} onPick={onPick} onUnpick={onUnpick} />
           ))
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   Checklist (nur gepickte Signups)
+--------------------------------------------------------- */
+const BUFF_CLASSES = [
+  "priest",
+  "mage",
+  "warlock",
+  "druid",
+  "monk",
+  "demonhunter",
+  "shaman",
+  "evoker",
+  "warrior",
+];
+const CLASS_LABEL = {
+  priest: "Priest",
+  mage: "Mage",
+  warlock: "Warlock",
+  druid: "Druid",
+  monk: "Monk",
+  demonhunter: "Demon Hunter",
+  shaman: "Shaman",
+  evoker: "Evoker",
+  warrior: "Warrior",
+};
+
+function ChecklistCard({ roster, charMap }) {
+  const counts = useMemo(() => {
+    const base = Object.fromEntries(BUFF_CLASSES.map((k) => [k, 0]));
+    for (const s of roster) {
+      const k = readClass(s, charMap);
+      if (k in base) base[k] += 1;
+    }
+    return base;
+  }, [roster, charMap]);
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-4 w-full">
+      <div className="text-slate-100 font-semibold mb-3">Checklist</div>
+      <div>
+        <div className="text-[13px] font-semibold text-slate-200 mb-2">Raidbuffs</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-y-2 gap-x-4">
+          {BUFF_CLASSES.map((klass) => {
+            const have = counts[klass] > 0;
+            return (
+              <div key={klass} className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ClassIcon klass={klass} size={18} />
+                  <span className="text-slate-300 text-sm">{CLASS_LABEL[klass]}</span>
+                </div>
+                <span className={have ? "text-emerald-400" : "text-rose-400"}>
+                  {have ? `${counts[klass]}x` : "missing"}
+                </span>
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -290,14 +362,13 @@ export default function RaidDetail() {
     };
   }, [id]);
 
-  // Gruppen
   const roster = useMemo(() => signups.filter((s) => s.picked), [signups]);
   const open = useMemo(() => signups.filter((s) => !s.picked), [signups]);
 
   const groupByRole = (arr) => ({
     tank: arr.filter((s) => String(s.role).toLowerCase() === "tank"),
-    healer: arr.filter((s) => String(s.role).toLowerCase() === "healer"),
     dps: arr.filter((s) => String(s.role).toLowerCase() === "dps"),
+    healer: arr.filter((s) => String(s.role).toLowerCase() === "healer"),
     lootbuddy: arr.filter((s) => String(s.role).toLowerCase() === "lootbuddy"),
   });
 
@@ -305,10 +376,7 @@ export default function RaidDetail() {
   const openG = useMemo(() => groupByRole(open), [open]);
 
   const totalRoster =
-    rosterG.tank.length +
-    rosterG.healer.length +
-    rosterG.dps.length +
-    rosterG.lootbuddy.length;
+    rosterG.tank.length + rosterG.healer.length + rosterG.dps.length + rosterG.lootbuddy.length;
   const totalOpen =
     openG.tank.length + openG.healer.length + openG.dps.length + openG.lootbuddy.length;
 
@@ -319,12 +387,11 @@ export default function RaidDetail() {
       await apiPost(`/api/raids/${id}/pick`, { signup_id: s.id });
       await loadAll();
     } catch (e) {
-      alert(`Pick fehlgeschlagen: ${e.message}`);
+      alert(`Pick fehlgeschlagen: ${String(e.message || e)}`);
     } finally {
       setActing(false);
     }
   }
-
   async function handleUnpick(s) {
     if (acting) return;
     setActing(true);
@@ -332,90 +399,93 @@ export default function RaidDetail() {
       await apiPost(`/api/raids/${id}/unpick`, { signup_id: s.id });
       await loadAll();
     } catch (e) {
-      alert(`Unpick fehlgeschlagen: ${e.message}`);
+      alert(`Unpick fehlgeschlagen: ${String(e.message || e)}`);
     } finally {
       setActing(false);
     }
   }
 
-  if (busy) return <div className="p-6 text-slate-300">Lade …</div>;
-  if (err) return <div className="p-6 text-red-400">Fehler: {err}</div>;
-  if (!raid) return <div className="p-6 text-slate-300">Raid nicht gefunden.</div>;
-
   return (
-    <div className="container mx-auto max-w-6xl px-4 py-6">
-      {/* Kopfbereich */}
-      <div className="bg-slate-800/60 rounded-xl p-4 mb-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-lg font-semibold">{raid.title || `Raid #${id}`}</div>
-            <div className="text-slate-400 text-sm">
-              {raid.datetime} • {raid.difficulty} • {raid.loot_type}
-            </div>
+    <div className="mx-auto max-w-[1200px] px-2 md:px-4">
+      {/* Kopf */}
+      <div className="bg-slate-800/60 rounded-xl p-4 mb-4 flex items-center justify-between">
+        <div className="text-slate-100">
+          <div className="font-semibold">{raid?.title || raid?.name || `Raid #${id}`}</div>
+          <div className="text-sm text-slate-400">
+            {raid?.date_str || raid?.date || ""}
+            {raid?.difficulty ? ` • ${raid.difficulty}` : ""}
+            {raid?.loot_type ? ` • ${raid.loot_type}` : ""}
           </div>
-          <div className="text-sm text-slate-300">
-            <span className="mr-4">
-              Roster: <strong>{totalRoster}</strong>
-            </span>
-            <span>
-              Signups: <strong>{totalOpen}</strong>
-            </span>
-          </div>
+        </div>
+        <div className="text-sm text-slate-300">
+          <span className="mr-4">Roster: {totalRoster}</span>
+          <span>Signups: {totalOpen}</span>
         </div>
       </div>
 
-      {/* Roster */}
-      <div className="bg-slate-800/50 rounded-xl p-4 mb-6">
-        <div className="font-semibold mb-3">Roster (geplant)</div>
-        <div className="grid grid-cols-4 gap-8">
+      {/* Roster (geplant) – 2 Reihen: Tanks & DPS / Healers & Lootbuddies */}
+      <div className="bg-slate-800/60 rounded-xl p-4 mb-4">
+        <div className="text-slate-100 font-semibold mb-2">Roster (geplant)</div>
+
+        {/* Reihe 1: Tanks + DPS */}
+        <div className="flex flex-wrap gap-8">
           <RoleColumn
             title="Tanks"
             role="tank"
             items={rosterG.tank}
             charMap={charMap}
+            onPick={handlePick}
             onUnpick={handleUnpick}
-          />
-          <RoleColumn
-            title="Healers"
-            role="healer"
-            items={rosterG.healer}
-            charMap={charMap}
-            onUnpick={handleUnpick}
+            emptyText="keine"
           />
           <RoleColumn
             title="DPS"
             role="dps"
             items={rosterG.dps}
             charMap={charMap}
+            onPick={handlePick}
             onUnpick={handleUnpick}
+            emptyText="keine"
+          />
+        </div>
+
+        {/* Reihe 2: Healers + Lootbuddies */}
+        <div className="mt-6 flex flex-wrap gap-8">
+          <RoleColumn
+            title="Healers"
+            role="healer"
+            items={rosterG.healer}
+            charMap={charMap}
+            onPick={handlePick}
+            onUnpick={handleUnpick}
+            emptyText="keine"
           />
           <RoleColumn
             title="Lootbuddies"
             role="lootbuddy"
             items={rosterG.lootbuddy}
             charMap={charMap}
+            onPick={handlePick}
             onUnpick={handleUnpick}
+            emptyText="keine"
           />
         </div>
       </div>
 
-      {/* Signups */}
-      <div className="bg-slate-800/50 rounded-xl p-4">
-        <div className="font-semibold mb-3">Signups (offen)</div>
-        <div className="grid grid-cols-4 gap-8">
+      {/* Signups (offen) – ebenfalls 2 Reihen */}
+      <div className="bg-slate-800/60 rounded-xl p-4 mb-4">
+        <div className="text-slate-100 font-semibold mb-2">Signups (offen)</div>
+
+        {/* Reihe 1: Tanks + DPS */}
+        <div className="flex flex-wrap gap-8">
           <RoleColumn
             title="Tanks"
             role="tank"
             items={openG.tank}
             charMap={charMap}
             onPick={handlePick}
-          />
-          <RoleColumn
-            title="Healers"
-            role="healer"
-            items={openG.healer}
-            charMap={charMap}
-            onPick={handlePick}
+            onUnpick={handleUnpick}
+            emptyText="keine"
           />
           <RoleColumn
             title="DPS"
@@ -423,6 +493,21 @@ export default function RaidDetail() {
             items={openG.dps}
             charMap={charMap}
             onPick={handlePick}
+            onUnpick={handleUnpick}
+            emptyText="keine"
+          />
+        </div>
+
+        {/* Reihe 2: Healers + Lootbuddies */}
+        <div className="mt-6 flex flex-wrap gap-8">
+          <RoleColumn
+            title="Healers"
+            role="healer"
+            items={openG.healer}
+            charMap={charMap}
+            onPick={handlePick}
+            onUnpick={handleUnpick}
+            emptyText="keine"
           />
           <RoleColumn
             title="Lootbuddies"
@@ -430,9 +515,20 @@ export default function RaidDetail() {
             items={openG.lootbuddy}
             charMap={charMap}
             onPick={handlePick}
+            onUnpick={handleUnpick}
+            emptyText="keine"
           />
         </div>
       </div>
+
+      {/* Checklist (nur gepickte) */}
+      <ChecklistCard roster={roster} charMap={charMap} />
+
+      {/* Status */}
+      {busy ? <div className="mt-4 text-slate-400 text-sm">Lade…</div> : null}
+      {err ? (
+        <div className="mt-4 text-rose-400 text-sm whitespace-pre-wrap">Fehler: {err}</div>
+      ) : null}
     </div>
   );
 }

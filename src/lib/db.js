@@ -1,3 +1,4 @@
+// src/lib/db.js
 import path from 'path';
 import fs from 'fs';
 import Database from 'better-sqlite3';

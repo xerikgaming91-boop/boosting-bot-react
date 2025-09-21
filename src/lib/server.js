@@ -324,7 +324,7 @@ export async function startServer() {
     }
   });
 
-  // Toggle pick/unpick (nur Owner/Admin)
+  // Toggle pick/unpick (bestehende Route)
   app.post("/api/signups/:id/toggle-picked", ensureAuth, async (req,res)=>{
     const sId=req.params.id; const { picked } = req.body||{};
     const s=Signups.getById(sId); if(!s) return res.status(404).json({ ok:false, error:"signup_not_found" });
@@ -387,6 +387,59 @@ export async function startServer() {
       try { await updateRaidMessage(s.raid_id); /* await publishRoster(s.raid_id); */ } catch {}
       res.json({ ok:true });
     } catch(e){ res.status(400).json({ ok:false, error:e?.message||"pick_failed" }); }
+  });
+
+  /* NEU: Kompatible Routen, die dein Frontend erwartet:
+         /api/raids/:id/pick   und   /api/raids/:id/unpick
+     -> setzen picked-Flag, entfernen Anmeldung aus "Signups"-Embed,
+        aktualisieren NUR das bestehende Embed (KEIN Roster-Repost)
+  */
+  app.post("/api/raids/:id/pick", ensureAuth, async (req, res) => {
+    try {
+      const raidId = Number(req.params.id);
+      const signupId = Number(req.body?.signup_id ?? req.body?.signupId ?? req.body?.id);
+      if (!raidId || !signupId) return res.status(400).json({ ok:false, error:"missing_params" });
+
+      const s = Signups.getById(signupId);
+      if (!s || Number(s.raid_id) !== raidId) return res.status(404).json({ ok:false, error:"signup_not_found" });
+
+      const raid = Raids.get(raidId);
+      await assertCanManageRaid(req.user.id, raid);
+
+      // exklusiv für diesen User/ Raid picken
+      Signups.setExclusivePick(s.raid_id, s.user_id, s.id);
+
+      // Embed nur aktualisieren (kein Roster-Repost)
+      try { await updateRaidMessage(s.raid_id); } catch {}
+
+      return res.json({ ok:true });
+    } catch (e) {
+      console.error("pick route error:", e);
+      res.status(500).json({ ok:false, error:"internal_error" });
+    }
+  });
+
+  app.post("/api/raids/:id/unpick", ensureAuth, async (req, res) => {
+    try {
+      const raidId = Number(req.params.id);
+      const signupId = Number(req.body?.signup_id ?? req.body?.signupId ?? req.body?.id);
+      if (!raidId || !signupId) return res.status(400).json({ ok:false, error:"missing_params" });
+
+      const s = Signups.getById(signupId);
+      if (!s || Number(s.raid_id) !== raidId) return res.status(404).json({ ok:false, error:"signup_not_found" });
+
+      const raid = Raids.get(raidId);
+      await assertCanManageRaid(req.user.id, raid);
+
+      Signups.setPicked(s.id, 0);
+
+      try { await updateRaidMessage(s.raid_id); } catch {}
+
+      return res.json({ ok:true });
+    } catch (e) {
+      console.error("unpick route error:", e);
+      res.status(500).json({ ok:false, error:"internal_error" });
+    }
   });
 
   /* Static / SPA */
