@@ -2,6 +2,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 /* ---------------------------------------------------------
+   KONFIG
+--------------------------------------------------------- */
+const MIN_GAP_MINUTES = 90; // Mindestabstand zwischen zwei geplanten Raids eines Users, sonst Pick-Block
+
+/* ---------------------------------------------------------
    Pfade zu Rollen- und Klassen-Icons
 --------------------------------------------------------- */
 const ROLE_ICON_FILE = {
@@ -114,6 +119,41 @@ const readWclUrl = (row, charMap) => {
 };
 
 /* ---------------------------------------------------------
+   User/ID Hilfen & Zeit
+--------------------------------------------------------- */
+function getUserKeyFromSignup(s, charMap) {
+  // Versucht verschiedene Felder zu nutzen
+  return (
+    firstNonEmpty(
+      s.user_id,
+      s.discord_id,
+      s.signup_discord_id,
+      s.discordId,
+      s.signup_user_id,
+      s.owner_id,
+      s.ownerId,
+      s.uid,
+      s.userId,
+      s.member_id,
+      s.memberId,
+      s.account_id
+    ) ||
+    (s.character_id && charMap[s.character_id]?.user_id) ||
+    null
+  );
+}
+
+function parseDate(d) {
+  if (!d) return null;
+  const t = new Date(d);
+  if (isNaN(+t)) return null;
+  return t;
+}
+function minutesDiff(a, b) {
+  return Math.abs((+a - +b) / 60000);
+}
+
+/* ---------------------------------------------------------
    UI Bestandteile
 --------------------------------------------------------- */
 function RoleTitle({ role, text }) {
@@ -158,6 +198,37 @@ const btnBase =
 const btnPick = `${btnBase} bg-emerald-600 hover:bg-emerald-500 text-white`;
 const btnUnpick = `${btnBase} bg-rose-600 hover:bg-rose-500 text-white`;
 
+/* Lockout -> Icon/Text */
+function LockoutBadge({ value }) {
+  if (!value) return null;
+  const v = String(value).trim().toLowerCase();
+  if (v === "unsaved") {
+    return (
+      <img
+        src="/icons/roles/loot.png"
+        width={16}
+        height={16}
+        alt="lootshare"
+        title="lootshare"
+        className="inline-block ml-1 align-[-3px]"
+      />
+    );
+  }
+  if (v === "saved") {
+    return (
+      <img
+        src="/icons/roles/saved.png"
+        width={16}
+        height={16}
+        alt="saved"
+        title="saved"
+        className="inline-block ml-1 align-[-3px]"
+      />
+    );
+  }
+  return <span className="shrink-0 ml-1 text-[11px] text-slate-400">• {value}</span>;
+}
+
 /* Eine Signup-Zeile (overflow-safe) */
 function SignupRow({ s, charMap, onPick, onUnpick }) {
   const isLoot = String(s.role).toLowerCase() === "lootbuddy";
@@ -165,9 +236,6 @@ function SignupRow({ s, charMap, onPick, onUnpick }) {
   const name = readDisplayName(s, charMap);
   const ilvl = isLoot ? null : readIlvl(s, charMap);
   const wcl = isLoot ? null : readWclUrl(s, charMap);
-
-  const rawLockout = s.lockout ? String(s.lockout) : "";
-  const isUnsaved = rawLockout.trim().toLowerCase() === "unsaved";
   const note = s.note ? String(s.note) : "";
 
   return (
@@ -194,21 +262,8 @@ function SignupRow({ s, charMap, onPick, onUnpick }) {
         {/* ilvl */}
         {ilvl ? <span className="shrink-0 ml-1 text-[11px] text-slate-300">• {ilvl} ilvl</span> : null}
 
-        {/* lockout / 'unsaved' => loot icon */}
-        {rawLockout ? (
-          isUnsaved ? (
-            <img
-              src="/icons/roles/loot.png"
-              width={16}
-              height={16}
-              alt="lootshare"
-              title="lootshare"
-              className="inline-block ml-1 align-[-3px]"
-            />
-          ) : (
-            <span className="shrink-0 ml-1 text-[11px] text-slate-400">• {rawLockout}</span>
-          )
-        ) : null}
+        {/* lockout -> Icon/Text */}
+        <LockoutBadge value={s.lockout} />
 
         {/* note */}
         {note ? (
@@ -315,6 +370,89 @@ function ChecklistCard({ roster, charMap }) {
 }
 
 /* ---------------------------------------------------------
+   NEU: Cycle-Konflikte
+   - Lädt andere geplante Raids der User im aktuellen Cycle
+   - Map: userKey -> [{raid_id, title, datetime, role}]
+--------------------------------------------------------- */
+function parseAssignments(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "object") return Object.values(raw);
+  return [];
+}
+function normalizeAssignmentEntry(entry) {
+  // Ziel: { user_id, username, entries: [{ raid_id, title, datetime, role }] }
+  if (!entry) return null;
+  const user_id = firstNonEmpty(entry.user_id, entry.discord_id, entry.id, entry.userId, entry.discordId);
+  const username = firstNonEmpty(entry.username, entry.name, entry.display_name, entry.tag, "Unbekannt");
+  const list = Array.isArray(entry.entries)
+    ? entry.entries
+    : Array.isArray(entry.raids)
+    ? entry.raids
+    : [];
+  const entries = list
+    .map((r) => ({
+      raid_id: firstNonEmpty(r.raid_id, r.id, r.raidId),
+      title: firstNonEmpty(r.title, r.name, `Raid #${firstNonEmpty(r.raid_id, r.id, r.raidId) ?? "?"}`),
+      datetime: firstNonEmpty(r.datetime, r.date, r.when, r.starts_at, r.start, ""),
+      role: (firstNonEmpty(r.role, r.signup_role, r.kind, "") || "").toString(),
+    }))
+    .filter((r) => r.raid_id);
+  return { user_id, username, entries };
+}
+function buildUserAssignmentsMap(assignments) {
+  const map = new Map();
+  for (const raw of parseAssignments(assignments)) {
+    const norm = normalizeAssignmentEntry(raw);
+    if (!norm?.user_id) continue;
+    map.set(String(norm.user_id), norm.entries || []);
+  }
+  return map;
+}
+
+function CycleConflictsBox({ visible, currentRaidId, picked, charMap, userAssignments }) {
+  if (!visible) return null;
+  // Nur zeigen, wenn es wirklich etwas zu zeigen gibt
+  const rows = picked
+    .map((s) => {
+      const key = getUserKeyFromSignup(s, charMap);
+      const list = key ? userAssignments.get(String(key)) || [] : [];
+      const others = list.filter((e) => String(e.raid_id) !== String(currentRaidId));
+      return { signup: s, others };
+    })
+    .filter((r) => r.others.length > 0);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="bg-slate-800/60 rounded-xl p-4 w-full">
+      <div className="text-slate-100 font-semibold mb-3">Eingeplant im aktuellen Cycle (andere Raids)</div>
+      <div className="space-y-3">
+        {rows.map(({ signup, others }) => {
+          const name = readDisplayName(signup, charMap);
+          return (
+            <div key={`conf-${signup.id}`} className="border border-slate-700/60 rounded-lg p-3">
+              <div className="text-slate-200 font-semibold mb-1">{name}</div>
+              <ul className="text-sm text-slate-300 space-y-1">
+                {others.map((e, i) => (
+                  <li key={`${e.raid_id}-${i}`} className="flex items-center justify-between gap-2">
+                    <span className="truncate">{e.title}</span>
+                    <span className="shrink-0 text-slate-400 text-xs">
+                      {e.datetime ? `${e.datetime}` : ""}
+                      {e.role ? ` • ${e.role}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
    Seite
 --------------------------------------------------------- */
 export default function RaidDetail() {
@@ -325,6 +463,11 @@ export default function RaidDetail() {
   const [busy, setBusy] = useState(true);
   const [err, setErr] = useState("");
   const [acting, setActing] = useState(false);
+
+  // Cycle Assignments (für Konfliktanzeige & Pick-Block)
+  const [cycleData, setCycleData] = useState(null);
+  const [cycleOk, setCycleOk] = useState(false);
+  const [userAssignments, setUserAssignments] = useState(() => new Map());
 
   async function loadAll() {
     setErr("");
@@ -345,12 +488,37 @@ export default function RaidDetail() {
     setCharMap(cmap);
   }
 
+  async function loadCycleAssignments() {
+    setCycleOk(false);
+    setCycleData(null);
+    try {
+      const d = await apiGet(`/api/raids/${id}/cycle-assignments`);
+      setCycleData(d);
+      setCycleOk(true);
+      setUserAssignments(buildUserAssignmentsMap(d));
+      return;
+    } catch (e1) {
+      try {
+        const d2 = await apiGet(`/api/raids/${id}/conflicts`);
+        setCycleData(d2);
+        setCycleOk(true);
+        setUserAssignments(buildUserAssignmentsMap(d2));
+        return;
+      } catch (e2) {
+        setCycleOk(false);
+        setCycleData(null);
+        setUserAssignments(new Map());
+      }
+    }
+  }
+
   useEffect(() => {
     let dead = false;
     (async () => {
       setBusy(true);
       try {
         await loadAll();
+        await loadCycleAssignments(); // NEU
       } catch (e) {
         if (!dead) setErr(String(e?.message || e));
       } finally {
@@ -380,24 +548,58 @@ export default function RaidDetail() {
   const totalOpen =
     openG.tank.length + openG.healer.length + openG.dps.length + openG.lootbuddy.length;
 
+  // Helper: prüfe Konflikt beim Pick
+  function hasTimeConflictForSignup(signup) {
+    if (!cycleOk || !raid) return false;
+    const currentStart = parseDate(raid?.datetime || raid?.date || raid?.date_str);
+    if (!currentStart) return false;
+
+    const userKey = getUserKeyFromSignup(signup, charMap);
+    if (!userKey) return false;
+
+    const list = userAssignments.get(String(userKey)) || [];
+    // Ignoriere aktuellen Raid
+    const others = list.filter((e) => String(e.raid_id) !== String(id));
+    if (others.length === 0) return false;
+
+    for (const e of others) {
+      const t = parseDate(e.datetime);
+      if (!t) continue;
+      if (minutesDiff(currentStart, t) < MIN_GAP_MINUTES) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function handlePick(s) {
     if (acting) return;
+    // Block, wenn Konflikt
+    if (hasTimeConflictForSignup(s)) {
+      alert(
+        `Pick blockiert: Dieser User ist zeitlich zu nah an einem anderen Raid im aktuellen Cycle eingeplant (weniger als ${MIN_GAP_MINUTES} Minuten Abstand).`
+      );
+      return;
+    }
     setActing(true);
     try {
       await apiPost(`/api/raids/${id}/pick`, { signup_id: s.id });
-      await loadAll();
+      await loadAll();             // Listen & Zähler aktualisieren
+      await loadCycleAssignments(); // Konflikt-Box aktualisieren
     } catch (e) {
       alert(`Pick fehlgeschlagen: ${String(e.message || e)}`);
     } finally {
       setActing(false);
     }
   }
+
   async function handleUnpick(s) {
     if (acting) return;
     setActing(true);
     try {
       await apiPost(`/api/raids/${id}/unpick`, { signup_id: s.id });
       await loadAll();
+      await loadCycleAssignments();
     } catch (e) {
       alert(`Unpick fehlgeschlagen: ${String(e.message || e)}`);
     } finally {
@@ -523,6 +725,17 @@ export default function RaidDetail() {
 
       {/* Checklist (nur gepickte) */}
       <ChecklistCard roster={roster} charMap={charMap} />
+
+      {/* NEU: Konflikt-Übersicht für Raidlead (optional, wenn Endpoint existiert) */}
+      <div className="mt-6">
+        <CycleConflictsBox
+          visible={cycleOk}
+          currentRaidId={id}
+          picked={roster}
+          charMap={charMap}
+          userAssignments={userAssignments}
+        />
+      </div>
 
       {/* Status */}
       {busy ? <div className="mt-4 text-slate-400 text-sm">Lade…</div> : null}

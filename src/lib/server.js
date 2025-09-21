@@ -6,7 +6,7 @@ import { Strategy as DiscordStrategy } from "passport-discord";
 import path from "path";
 import fs from "fs/promises";
 import { fileURLToPath } from "url";
-
+import registerCycleRoutes from "./cycle.routes.js";
 import { CONFIG, assertRequiredEnv } from "./config.js";
 import { db, Users, Raids, Characters, Signups } from "./db.js";
 import { fetchFromRaiderIO } from "./raiderio.js";
@@ -475,6 +475,8 @@ export async function startServer() {
       });
     }
   }
+
+  
 
   app.listen(CONFIG.port, ()=> console.log(`🌐 Server läuft auf Port ${CONFIG.port} (${process.env.NODE_ENV||"dev"})`));
   const mod=await ensureSchedulerLoaded(); if (mod?.startCharacterSync) mod.startCharacterSync(); if (mod?.startPickRelease) mod.startPickRelease?.();
