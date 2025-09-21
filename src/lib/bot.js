@@ -88,7 +88,7 @@ const CLASS_LIST = [
   "Druid","Demon Hunter","Evoker"
 ];
 
-// ✅ Server-Emoji IDs
+// ✅ Server-Emoji IDs (Rollen)
 const EMOJI = {
   dps: "<:dps:1410398124090064957>",
   tank: "<:tank:1410398280679952484>",
@@ -96,9 +96,37 @@ const EMOJI = {
   loot: "<:Loothsare:1418723379510509610>",
 };
 
-// Klassen-Emoji: z.B. "Death Knight" → ":DeathKnight:"
+/**
+ * ✅ Klassen-Emojis
+ * Für die meisten Klassen funktioniert "<:ClassOhneLeerzeichen:ID>" (z.B. Evoker).
+ * Für Death Knight & Demon Hunter heißen die Emojis aber **dk** bzw. **dh**.
+ * Wir mappen daher explizit den **Emoji-Namen** und die **ID**.
+ */
+const CLASS_EMOJI = {
+  Evoker:       { name: "Evoker",       id: "1410398715222691972" },
+  Shaman:       { name: "Shaman",       id: "1410398490126848122" },
+  Mage:         { name: "Mage",         id: "1410398574038221000" },
+  Monk:         { name: "Monk",         id: "1410398330412077156" },
+  Paladin:      { name: "Paladin",      id: "1410399362705522699" },
+  Priest:       { name: "Priest",       id: "1410398598033703073" },
+  Rogue:        { name: "Rogue",        id: "1410398518530670613" },
+  Warlock:      { name: "Warlock",      id: "1410399511502655560" },
+  Warrior:      { name: "Warrior",      id: "1410398635220537406" },
+  Druid:        { name: "Druid",        id: "1410398827436965980" },
+
+  // 🔧 Spezials: Emoji-Namen sind "dk" / "dh" (nicht DeathKnight/DemonHunter)
+  "Death Knight": { name: "dk", id: "1410398938581700680" },
+  "Demon Hunter": { name: "dh", id: "1410398548989706290" },
+};
+
+// Klassen-Emoji: z.B. "Death Knight" → "<:dk:ID>"
 function classEmoji(cls) {
   if (!cls) return "";
+  const entry = CLASS_EMOJI[cls];
+  if (entry?.id && entry?.name) return `<:${entry.name}:${entry.id}>`;
+
+  // Fallback: versuche "<:ClassOhneLeerzeichen:ID>" wenn es einen Eintrag nur mit ID gäbe
+  // oder einfach ":ClassOhneLeerzeichen:" (falls ein gleichnamiges Server-Emoji existiert)
   const token = String(cls).replace(/\s+/g, "");
   return `:${token}:`;
 }
@@ -344,31 +372,52 @@ function deleteSignupById(signupId, userId) {
 }
 
 /* =============================================================================
-   Grouping & Embeds
+   Grouping & Embeds (mit Klassen-Emoji-Aggregation pro User)
 ============================================================================= */
 
-// ⚙️ Eintrag zusammenbauen (mit Klassen-Emoji)
-function renderEntry(s) {
-  let cls = null;
-
-  if (s.role === "lootbuddy") {
-    cls = s.signup_class || null;
-  } else if (s.character_id) {
+// → Klasse eines Signup-Eintrags bestimmen
+function classFromSignup(s) {
+  if (s.role === "lootbuddy") return s.signup_class || null;
+  if (s.character_id) {
     const ch = getCharacter(s.character_id);
-    cls = ch?.class || null;
+    return ch?.class || null;
   }
-
-  const clsEmoji = cls ? ` ${classEmoji(cls)}` : "";
-  return `${mention(s.user_id)}${clsEmoji}`;
+  return null;
 }
 
-function groupSignups(signups) {
-  const buckets = { tanks: [], healers: [], dps: [], lootbuddies: [] };
+// Aggregation: pro Bucket nach user_id gruppieren; Klassen sammeln und vor die Mention setzen
+function groupSignupsAggregated(signups) {
+  const buckets = { tanks: new Map(), healers: new Map(), dps: new Map(), lootbuddies: new Map() };
+
   for (const s of signups) {
-    const bucket = bucketForRole(s.role);
-    buckets[bucket].push(renderEntry(s));
+    const bucketKey = bucketForRole(s.role);
+    const map = buckets[bucketKey];
+
+    const userId = String(s.user_id);
+    const cls = classFromSignup(s);
+
+    if (!map.has(userId)) {
+      map.set(userId, { userId, classes: new Set() });
+    }
+    if (cls) map.get(userId).classes.add(cls);
   }
-  return buckets;
+
+  // in Stringlisten transformieren
+  const toList = (map) => {
+    const out = [];
+    for (const { userId, classes } of map.values()) {
+      const icons = [...classes].map(classEmoji).join("");
+      out.push(`${icons}${icons ? " " : ""}${mention(userId)}`);
+    }
+    return out;
+  };
+
+  return {
+    tanks: toList(buckets.tanks),
+    healers: toList(buckets.healers),
+    dps: toList(buckets.dps),
+    lootbuddies: toList(buckets.lootbuddies),
+  };
 }
 
 // Titelzeile mit Gesamtsumme, Felder ohne (x)
@@ -397,7 +446,7 @@ function buildTopEmbed(raid) {
 async function buildSignupsEmbed(raidId) {
   const all = await getSignups(raidId);
   const unpicked = all.filter((s) => Number(s.picked) !== 1);
-  const g = groupSignups(unpicked);
+  const g = groupSignupsAggregated(unpicked);
   const total = unpicked.length;
 
   return new EmbedBuilder()
@@ -422,7 +471,7 @@ async function buildRosterEmbed(raidId) {
     }
   } catch {}
 
-  const g = groupSignups(rows);
+  const g = groupSignupsAggregated(rows);
   const total = rows.length;
 
   return new EmbedBuilder()
