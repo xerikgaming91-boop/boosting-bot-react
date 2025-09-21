@@ -145,10 +145,7 @@ CREATE TABLE IF NOT EXISTS signups (
   ensureColumn('signups', 'signup_class', 'TEXT', 'NULL');
 
   // --- Wechsel: saved -> lockout ---
-  // 1) lockout-Spalte sicherstellen
   ensureColumn('signups', 'lockout', 'TEXT', `'unsaved'`);
-
-  // 2) Falls noch alte 'saved'-Spalte existiert → Werte übernehmen
   if (hasColumn('signups', 'saved')) {
     try {
       db.exec(`
@@ -157,7 +154,6 @@ CREATE TABLE IF NOT EXISTS signups (
          WHERE saved IS NOT NULL;
       `);
     } catch {}
-    // Versuch, alte Spalte zu droppen (wenn SQLite-Version es kann)
     try { db.exec(`ALTER TABLE signups DROP COLUMN saved;`); } catch {}
   }
 
@@ -202,7 +198,7 @@ export const Users = {
 export const Characters = {
   listByUser(user_id) {
     return db.prepare(`SELECT * FROM characters WHERE user_id=? ORDER BY created_at DESC, id DESC`).all(user_id);
-  },
+    },
   listAll() {
     return db.prepare(`SELECT * FROM characters ORDER BY updated_at DESC, id DESC`).all();
   },
@@ -315,7 +311,7 @@ export const Signups = {
     `).all(raid_id);
   },
 
-  // kompatibler Helper (bot.js nutzt ihn)
+  // kompatibler Helper (z. B. für Bot)
   listByRaid(raid_id) {
     return db.prepare(`SELECT * FROM signups WHERE raid_id=? ORDER BY created_at ASC, id ASC`).all(raid_id);
   },
