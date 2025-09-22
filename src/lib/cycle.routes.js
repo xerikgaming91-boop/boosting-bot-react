@@ -1,138 +1,141 @@
 // src/lib/cycle.routes.js
-// Für jeden im aktuellen Raid gepickten User: andere gepickte Raids desselben Zyklus
-// Liefert je User: { user_id, user_name, entries: [{raid_id, title, datetime, role}] }
+import { db, Users } from "./db.js";
 
-import { db } from "./db.js";
-
-/* ───── Zyklus (Mi 00:00:00 bis Di 23:59:59) ───── */
-function cycleBoundsFromDate(date) {
-  const d = new Date(date);
-  const wd = d.getDay();            // 0 So … 3 Mi
-  const diffToWed = (wd - 3 + 7) % 7;
-  const start = new Date(d);
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - diffToWed);
-
-  const end = new Date(start);
-  end.setDate(end.getDate() + 6);   // Mi -> Di
-  end.setHours(23, 59, 59, 999);
-
-  const toSql = (x) =>
-    `${x.getFullYear()}-${String(x.getMonth()+1).padStart(2,"0")}-${String(x.getDate()).padStart(2,"0")} ` +
-    `${String(x.getHours()).padStart(2,"0")}:${String(x.getMinutes()).padStart(2,"0")}:${String(x.getSeconds()).padStart(2,"0")}`;
-
-  return { startSql: toSql(start), endSql: toSql(end) };
-}
-function getCycleBounds(dtStr) {
-  const dt = new Date(String(dtStr || "").replace(" ", "T"));
-  return isNaN(+dt) ? cycleBoundsFromDate(new Date()) : cycleBoundsFromDate(dt);
-}
-const inPlaceholders = (n) => Array.from({ length: n }, () => "?").join(",");
-
-/* ───── Kernabfrage ───── */
-function getCycleAssignmentsForRaid(raidId) {
-  // 1) Datum des Zielraids
-  const raidRow = db.prepare(`SELECT id, datetime FROM raids WHERE id=?`).get(raidId);
-  if (!raidRow) return [];
-
-  const { startSql, endSql } = getCycleBounds(raidRow.datetime);
-
-  // 2) Gepickte Signups in diesem Raid
-  const pickedRows = db.prepare(`
-    SELECT
-      s.id           AS signup_id,
-      s.role         AS role,
-      s.raid_id      AS raid_id,
-      s.picked       AS picked,
-      s.user_id      AS s_user_id,
-      s.character_id AS character_id,
-      c.user_id      AS c_user_id
-    FROM signups s
-    LEFT JOIN characters c ON c.id = s.character_id
-    WHERE s.raid_id=? AND s.picked=1
-  `).all(raidId);
-
-  if (pickedRows.length === 0) return [];
-
-  // 3) user_keys bilden (COALESCE(s.user_id, c.user_id))
-  const userKeys = [];
-  for (const r of pickedRows) {
-    const key = String(r.s_user_id || r.c_user_id || "");
-    if (key) userKeys.push(key);
-  }
-  const uniqueKeys = Array.from(new Set(userKeys));
-  if (!uniqueKeys.length) return [];
-
-  // 4) Namen aus users holen (discord_id == user_key)
-  let nameMap = new Map();
-  try {
-    const sqlU = `SELECT discord_id, username FROM users WHERE discord_id IN (${inPlaceholders(uniqueKeys.length)})`;
-    const rowsU = db.prepare(sqlU).all(...uniqueKeys);
-    nameMap = new Map(rowsU.map(r => [String(r.discord_id), r.username || String(r.discord_id)]));
-  } catch {
-    nameMap = new Map(uniqueKeys.map(k => [String(k), String(k)]));
-  }
-
-  // 5) Andere geplante (picked) Raids dieser user_keys im Zyklus (ohne aktuellen Raid)
-  const sql = `
-    SELECT
-      s.raid_id                        AS raid_id,
-      s.role                           AS role,
-      s.picked                         AS picked,
-      COALESCE(s.user_id, c.user_id)   AS user_key,
-      r.title                          AS title,
-      r.datetime                       AS datetime
-    FROM signups s
-    JOIN raids r ON r.id = s.raid_id
-    LEFT JOIN characters c ON c.id = s.character_id
-    WHERE s.picked=1
-      AND r.datetime BETWEEN ? AND ?
-      AND s.raid_id != ?
-      AND COALESCE(s.user_id, c.user_id) IN (${inPlaceholders(uniqueKeys.length)})
-    ORDER BY r.datetime ASC
-  `;
-  const otherRows = db.prepare(sql).all(startSql, endSql, raidId, ...uniqueKeys);
-
-  // 6) Gruppieren pro user_key
-  const grouped = new Map(uniqueKeys.map(k => [String(k), []]));
-  for (const r of otherRows) {
-    const uk = String(r.user_key);
-    if (!grouped.has(uk)) grouped.set(uk, []);
-    grouped.get(uk).push({ raid_id: r.raid_id, title: r.title, datetime: r.datetime, role: r.role });
-  }
-
-  // 7) Ergebnis
-  return uniqueKeys.map(k => ({
-    user_id: String(k),
-    user_name: nameMap.get(String(k)) || String(k),
-    entries: grouped.get(String(k)) || [],
-  }));
-}
-
-/* ───── Routen ───── */
+/**
+ * Liefert für einen Raid die Teilnehmer (Roster + offene Anmeldungen) und
+ * für jeden Teilnehmer alle ANDEREN Raids, in denen er/sie bereits GE-PICKT ist.
+ *
+ * Response-Form:
+ * [
+ *   {
+ *     user_id: "1234567890",
+ *     user_name: "DiscordName",
+ *     entries: [
+ *       {
+ *         raid_id: 42,
+ *         title: "Manaforge Heroic 8/8 VIP",
+ *         datetime: "2025-09-22 14:00:00",
+ *         role: "dps" | "tank" | "healer" | "lootbuddy",
+ *         char_name: "Synbeam",
+ *         char_class: "Shaman"
+ *       },
+ *       ...
+ *     ]
+ *   },
+ *   ...
+ * ]
+ */
 export default function registerCycleRoutes(app) {
-  app.get("/api/raids/:id/cycle-assignments", (req, res) => {
+  // kompatibel zu deinem Frontend: /api/raids/:id/cycle-assignments
+  app.get("/api/raids/:id/cycle-assignments", async (req, res) => {
     try {
       const raidId = Number(req.params.id);
-      if (!Number.isFinite(raidId)) return res.status(400).json({ ok:false, error:"invalid_raid_id" });
-      const data = getCycleAssignmentsForRaid(raidId);
-      return res.json({ ok:true, data });
-    } catch (err) {
-      console.error("cycle-assignments error:", err);
-      return res.status(500).json({ ok:false, error:"internal_error" });
+      if (!Number.isInteger(raidId)) {
+        return res.status(400).json({ ok: false, error: "invalid id" });
+      }
+
+      // 1) Alle Teilnehmer dieses Raids (Roster + offene Anmeldungen)
+      //    -> wir benötigen user_id; char_id nur für Anzeige
+      const cols = detectSignupColumns();
+      const charCol = cols.charCol || "character_id";
+
+      const participants = db
+        .prepare(
+          `
+          SELECT s.user_id, s.role, s.${charCol} AS character_id
+          FROM signups s
+          WHERE s.raid_id = ?
+          GROUP BY s.user_id
+        `
+        )
+        .all(raidId);
+
+      if (!participants || participants.length === 0) {
+        return res.json({ ok: true, data: [] });
+      }
+
+      // 2) Für alle Teilnehmer alle ANDEREN Raids holen, in denen sie GE-PICKT sind.
+      const qPicked = db.prepare(
+        `
+        SELECT
+          r.id AS raid_id,
+          r.title,
+          r.datetime,
+          r.difficulty,
+          r.loot_type,
+          s.user_id,
+          s.role,
+          s.${charCol} AS character_id,
+          COALESCE(c.name, NULL)  AS char_name,
+          COALESCE(c.class, NULL) AS char_class
+        FROM signups s
+        JOIN raids r ON r.id = s.raid_id
+        LEFT JOIN characters c ON c.id = s.${charCol}
+        WHERE s.user_id = ?
+          AND s.picked = 1           -- <<< NUR gepickt!
+          AND r.id != ?              -- aktuellen Raid ausblenden
+        ORDER BY r.datetime ASC
+      `
+      );
+
+      const resultMap = new Map();
+      for (const p of participants) {
+        const list = qPicked.all(p.user_id, raidId).map((row) => ({
+          raid_id: row.raid_id,
+          title: row.title,
+          datetime: row.datetime,
+          role: normalizeRole(row.role),
+          char_name: row.char_name || null,
+          char_class: normalizeClass(row.char_class),
+        }));
+
+        // Discord-Anzeigename, falls vorhanden
+        const uRec = Users.get(p.user_id);
+        const user_name = uRec?.username || null;
+
+        resultMap.set(String(p.user_id), {
+          user_id: String(p.user_id),
+          user_name,
+          entries: list,
+        });
+      }
+
+      const out = Array.from(resultMap.values());
+      return res.json({ ok: true, data: out });
+    } catch (e) {
+      console.error("cycle-assignments error:", e);
+      return res.status(500).json({ ok: false, error: "internal error" });
     }
   });
 
-  // Alias
-  app.get("/api/raids/:id/conflicts", (req, res) => {
-    try {
-      const raidId = Number(req.params.id);
-      if (!Number.isFinite(raidId)) return res.status(400).json({ ok:false, error:"invalid_raid_id" });
-      const data = getCycleAssignmentsForRaid(raidId);
-      return res.json({ ok:true, data });
-    } catch (err) {
-      console.error("conflicts error:", err);
-      return res.status(500).json({ ok:false, error:"internal_error" });
-    }
-  });
+  // andere cycle-bezogene Routen können hier registriert bleiben/werden
+}
+
+/* ───────────────────────────── Helpers ───────────────────────────── */
+
+function detectSignupColumns() {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(signups)`).all();
+    const cols = rows.map((r) => r.name);
+    const hasCharacterId = cols.includes("character_id");
+    const hasCharId = cols.includes("char_id");
+    return {
+      charCol: hasCharacterId ? "character_id" : hasCharId ? "char_id" : null,
+    };
+  } catch {
+    return { charCol: "character_id" };
+  }
+}
+
+function normalizeRole(r) {
+  const v = String(r || "").toLowerCase();
+  if (v === "heal") return "healer";
+  if (v === "lb" || v === "lootbuddies") return "lootbuddy";
+  return v || null;
+}
+
+function normalizeClass(c) {
+  if (!c) return null;
+  const s = String(c).trim();
+  return s;
 }

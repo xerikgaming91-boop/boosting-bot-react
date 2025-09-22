@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, Link } from "react-router-dom";
 
 /* ---------------------------------------------------------
    KONFIG
 --------------------------------------------------------- */
-const MIN_GAP_MINUTES = 90;
+const MIN_GAP_MINUTES = 90; // Abstand zwischen Raids für Konflikt
 const DIFFICULTY_OPTIONS = ["Normal", "Heroic", "Mythic"];
 const LOOT_OPTIONS = ["saved", "unsaved", "vip", "community"];
 
@@ -38,10 +38,7 @@ async function apiGet(url) {
   const res = await fetch(url, { credentials: "include" });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const json = await res.json().catch(() => ({}));
-  if (json && typeof json === "object" && "ok" in json) {
-    if ("data" in json) return json.data;
-    return json;
-  }
+  if (json && typeof json === "object" && "ok" in json) return json.data ?? json;
   return json;
 }
 async function apiPost(url, body) {
@@ -78,7 +75,6 @@ const firstNonEmpty = (...vals) => {
   for (const v of vals) if (v !== undefined && v !== null && String(v) !== "") return v;
   return undefined;
 };
-
 const pad2 = (n) => String(n).padStart(2, "0");
 
 function lootLabel(v) {
@@ -95,15 +91,8 @@ function normalizeClassName(raw) {
   if (!raw) return "";
   const s = String(raw).toLowerCase().trim();
   const compact = s.replace(/[\s_-]+/g, "");
-  const map = {
-    dk: "deathknight",
-    deathknight: "deathknight",
-    deathnight: "deathknight",
-    dh: "demonhunter",
-    demonhunter: "demonhunter",
-  };
-  if (map[compact]) return map[compact];
-  return compact;
+  const map = { dk: "deathknight", deathnight: "deathknight", dh: "demonhunter" };
+  return map[compact] || compact;
 }
 
 const readDisplayName = (row, charMap) => {
@@ -119,18 +108,6 @@ const readIlvl = (row, charMap) => {
   const n = Number(firstNonEmpty(row.char_ilvl, row.ilvl, ch?.ilvl, ""));
   return Number.isFinite(n) && n > 0 ? n : null;
 };
-const readWclUrl = (row, charMap) => {
-  const ch = row.character_id ? charMap[row.character_id] : null;
-  const direct = firstNonEmpty(row.char_wcl_url, row.wcl_url, ch?.wcl_url, "");
-  if (direct) return direct;
-  const region = firstNonEmpty(row.char_region, ch?.region, "");
-  const realm = firstNonEmpty(row.char_realm, ch?.realm, "");
-  const name = firstNonEmpty(row.char_name, ch?.name, "");
-  if (region && realm && name) {
-    return `https://www.warcraftlogs.com/character/${region}/${realm}/${name}`;
-  }
-  return null;
-};
 
 /* Zeit */
 function parseDate(d) {
@@ -145,7 +122,9 @@ function minutesDiff(a, b) {
 function fmtShort(dbStr) {
   const d = parseDate(dbStr);
   if (!d) return dbStr || "";
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(
+    d.getMinutes()
+  )}`;
 }
 
 /* Date helpers */
@@ -220,16 +199,13 @@ function SignupRow({ s, charMap, onPick, onUnpick }) {
   const klass = readClass(s, charMap);
   const name = readDisplayName(s, charMap);
   const ilvl = isLoot ? null : readIlvl(s, charMap);
-  const wcl = isLoot ? null : readWclUrl(s, charMap);
   const note = s.note ? String(s.note) : "";
 
   return (
     <div className="flex items-center justify-between gap-3 py-1 px-2 rounded-md hover:bg-slate-700/25">
       <div className="flex-1 min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1">
         <ClassIcon klass={klass} size={22} />
-        {isLoot ? <span className="truncate">{name}</span> : wcl ? (
-          <a href={wcl} target="_blank" rel="noreferrer" className="truncate underline decoration-dotted text-sky-300 hover:text-sky-200" title="WarcraftLogs öffnen">{name}</a>
-        ) : <span className="truncate">{name}</span>}
+        <span className="truncate">{name}</span>
         {ilvl ? <span className="shrink-0 ml-1 text-[11px] text-slate-300">• {ilvl} ilvl</span> : null}
         <LockoutBadge value={s.lockout} />
         {note ? <span className="shrink-0 ml-1 px-1.5 py-0.5 rounded bg-slate-700/40 text-[11px] text-slate-200">{note}</span> : null}
@@ -259,7 +235,6 @@ function RoleColumn({ title, role, items, charMap, onPick, onUnpick, emptyText =
 /* Checklist */
 const BUFF_CLASSES = ["priest","mage","warlock","druid","monk","demonhunter","shaman","evoker","warrior"];
 const CLASS_LABEL = { priest:"Priest", mage:"Mage", warlock:"Warlock", druid:"Druid", monk:"Monk", demonhunter:"Demon Hunter", shaman:"Shaman", evoker:"Evoker", warrior:"Warrior" };
-
 function ChecklistCard({ roster, charMap }) {
   const counts = useMemo(() => {
     const base = Object.fromEntries(BUFF_CLASSES.map((k) => [k, 0]));
@@ -269,7 +244,6 @@ function ChecklistCard({ roster, charMap }) {
     }
     return base;
   }, [roster, charMap]);
-
   return (
     <div className="bg-slate-800/60 rounded-xl p-4 w-full">
       <div className="text-slate-100 font-semibold mb-3">Checklist</div>
@@ -297,9 +271,7 @@ function ChecklistCard({ roster, charMap }) {
 }
 
 /* ---------------------------------------------------------
-   Cycle-Konflikte (Anzeige)
-   -> jetzt für Roster + offene Signups
-   -> pro User Überschrift = Discord-Name (vom Server), Fallbacks vorhanden
+   Cycle-Assignments (Anzeige andere Raids)
 --------------------------------------------------------- */
 function parseAssignments(raw) {
   if (!raw) return [];
@@ -316,7 +288,9 @@ function normalizeAssignmentEntry(entry) {
     raid_id: firstNonEmpty(r.raid_id, r.id, r.raidId),
     title: firstNonEmpty(r.title, r.name, `Raid #${firstNonEmpty(r.raid_id, r.id, r.raidId) ?? "?"}`),
     datetime: firstNonEmpty(r.datetime, r.date, r.when, r.starts_at, r.start, ""),
-    role: (firstNonEmpty(r.role, r.signup_role, r.kind, "") || "").toString(),
+    role: (firstNonEmpty(r.role, r.signup_role, r.kind, "") || "").toString().toLowerCase(),
+    char_name: firstNonEmpty(r.char_name, r.character_name, r.char, ""),
+    char_class: normalizeClassName(firstNonEmpty(r.char_class, r.character_class, r.class, "")),
   })).filter((r) => r.raid_id);
   return { user_id, user_name, entries };
 }
@@ -331,11 +305,11 @@ function buildUserAssignmentsMap(assignments) {
   return map;
 }
 
-/** Box für andere Raids – berücksichtigt Roster + offene Signups, blendet aktuellen Raid aus */
+/** Box zeigt andere Raids (Roster + offene Anmeldungen werden berücksichtigt) */
 function CycleConflictsBox({ visible, currentRaidId, signupsAll, charMap, userAssignments }) {
   if (!visible) return null;
 
-  // pro Signup den "User-Key" ziehen
+  // Für alle Spieler, die im aktuellen Raid (Roster + offene) auftauchen:
   const rows = signupsAll
     .map((s) => {
       const key =
@@ -348,8 +322,9 @@ function CycleConflictsBox({ visible, currentRaidId, signupsAll, charMap, userAs
 
       const info = userAssignments.get(String(key));
       const list = info?.entries || [];
+
+      // Nur andere Raids (nicht der aktuelle)
       const others = list.filter((e) => String(e.raid_id) !== String(currentRaidId));
-      if (others.length === 0) return null;
 
       // Name für die Überschrift: bevorzugt Discord-Name vom Server; Fallbacks aus Signup/Char
       const fallbackName =
@@ -369,28 +344,50 @@ function CycleConflictsBox({ visible, currentRaidId, signupsAll, charMap, userAs
     })
     .filter(Boolean);
 
-  if (rows.length === 0) return null;
-
   return (
     <div className="bg-slate-800/60 rounded-xl p-4 w-full">
-      <div className="text-slate-100 font-semibold mb-3">Eingeplant im aktuellen Cycle (andere Raids)</div>
-      <div className="space-y-3">
-        {rows.map((row) => (
-          <div key={`conf-${row.signupId}`} className="border border-slate-700/60 rounded-lg p-3">
-            <div className="text-slate-200 font-semibold mb-1">{row.name}</div>
-            <ul className="text-sm text-slate-300 space-y-1">
-              {row.others.map((e, i) => (
-                <li key={`${row.key}-${e.raid_id}-${i}`} className="flex items-center justify-between gap-2">
-                  <span className="truncate">{e.title}</span>
-                  <span className="shrink-0 text-slate-400 text-xs">
-                    {fmtShort(e.datetime)}{e.role ? ` • ${e.role}` : ""}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
+      <div className="text-slate-100 font-semibold mb-3">Eingeplant (andere Raids)</div>
+
+      {/* Empty-State: Box bleibt sichtbar */}
+      {rows.every((r) => (r.others || []).length === 0) ? (
+        <div className="text-sm text-slate-400 border border-slate-700/60 rounded-lg p-3">
+          Keine anderen Picks/Anmeldungen gefunden.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {rows
+            .filter((r) => (r.others || []).length > 0)
+            .map((row) => (
+              <div key={`conf-${row.signupId}`} className="border border-slate-700/60 rounded-lg p-3">
+                <div className="text-slate-200 font-semibold mb-2">{row.name}</div>
+                <ul className="text-sm text-slate-300 space-y-1">
+                  {row.others.map((e, i) => (
+                    <li key={`${row.key}-${e.raid_id}-${i}`} className="flex items-center justify-between gap-2">
+                      {/* links: Char + Rolle */}
+                      <div className="min-w-0 flex items-center gap-2">
+                        {e.char_class ? <ClassIcon klass={e.char_class} size={18} /> : null}
+                        <span className="truncate">{e.char_name || "–"}</span>
+                        {e.role ? <span className="text-slate-400 text-xs">• {e.role}</span> : null}
+                      </div>
+
+                      {/* rechts: Zeit + Raid-Link */}
+                      <div className="shrink-0 flex items-center gap-3">
+                        <span className="text-slate-400 text-xs">{fmtShort(e.datetime)}</span>
+                        <Link
+                          to={`/raids/${e.raid_id}`}
+                          className="text-xs underline decoration-dotted text-sky-300 hover:text-sky-200 truncate max-w-[220px]"
+                          title={e.title}
+                        >
+                          {e.title}
+                        </Link>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -427,14 +424,12 @@ export default function RaidDetail() {
   const [raidleadErr, setRaidleadErr] = useState("");
 
   // Cycle
+  const [assignments, setAssignments] = useState(() => new Map());
   const [cycleOk, setCycleOk] = useState(false);
-  const [userAssignments, setUserAssignments] = useState(() => new Map());
 
   function fillEditFromRaid(r) {
     const dif = r?.difficulty || "";
-    const bosses = dif === "Mythic"
-      ? (Number.isFinite(+r?.mythic_bosses) ? Number(r.mythic_bosses) : 0)
-      : 8;
+       const bosses = dif === "Mythic" ? (Number.isFinite(+r?.mythic_bosses) ? Number(r.mythic_bosses) : 0) : 8;
     setEditState({
       datetimeLocal: toDatetimeLocalValue(r?.datetime || r?.date || r?.date_str),
       difficulty: dif,
@@ -466,8 +461,7 @@ export default function RaidDetail() {
       const user = res?.user || null;
       setWhoami(user);
       const r = nextRaid || raid;
-      const allowed =
-        !!user && (user.is_elevated || user.is_raidlead || (r && String(r.created_by) === String(user.id)));
+      const allowed = !!user && (user.is_elevated || user.is_raidlead || (r && String(r.created_by) === String(user.id)));
       setCanEdit(!!allowed);
     } catch {
       setWhoami(null);
@@ -494,15 +488,12 @@ export default function RaidDetail() {
   async function loadCycleAssignments() {
     setCycleOk(false);
     try {
-      const d = await apiGet(`/api/raids/${id}/cycle-assignments`).catch(() => null);
-      const data = d ?? (await apiGet(`/api/raids/${id}/conflicts`).catch(() => null));
-      if (data) {
-        setUserAssignments(buildUserAssignmentsMap(data));
-        setCycleOk(true);
-      }
+      const payload = await apiGet(`/api/raids/${id}/cycle-assignments`);
+      setAssignments(buildUserAssignmentsMap(payload));
+      setCycleOk(true);
     } catch {
+      setAssignments(new Map());
       setCycleOk(false);
-      setUserAssignments(new Map());
     }
   }
 
@@ -520,11 +511,17 @@ export default function RaidDetail() {
         if (!dead) setBusy(false);
       }
     })();
-    return () => { dead = true; };
+    return () => {
+      dead = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  useEffect(() => { (async () => { await loadRaidleadsIfAllowed(); })(); }, [whoami?.is_elevated]); // eslint-disable-line
+  useEffect(() => {
+    (async () => {
+      await loadRaidleadsIfAllowed();
+    })();
+  }, [whoami?.is_elevated]); // eslint-disable-line
 
   const roster = useMemo(() => signups.filter((s) => s.picked), [signups]);
   const open = useMemo(() => signups.filter((s) => !s.picked), [signups]);
@@ -552,7 +549,7 @@ export default function RaidDetail() {
 
     if (!key) return false;
 
-    const info = userAssignments.get(String(key));
+    const info = assignments.get(String(key));
     const list = info?.entries || [];
     const others = list.filter((e) => String(e.raid_id) !== String(id));
     for (const e of others) {
@@ -662,6 +659,11 @@ export default function RaidDetail() {
     const bosses = raid.difficulty === "Mythic" && raid.mythic_bosses != null ? raid.mythic_bosses : 8;
     return buildTitle({ difficulty: raid.difficulty, bosses, lootType: raid.loot_type });
   }, [raid, id]);
+
+  // Sichtbarkeit der Box: Raidlead ODER Elevated ODER Owner (immer – unabhängig vom Cycle)
+  const canSeeCycleBox =
+    (!!whoami && (whoami.is_raidlead || whoami.is_elevated)) ||
+    (!!whoami && raid && String(raid.created_by) === String(whoami.id));
 
   return (
     <div className="mx-auto max-w-[1200px] px-2 md:px-4">
@@ -839,21 +841,20 @@ export default function RaidDetail() {
         </div>
       </div>
 
-      {/* Checklist */}
-      <ChecklistCard roster={roster} charMap={charMap} />
-
-      {/* Konflikt-Box (andere Raids) für Roster + offene Signups */}
+      {/* Andere Raids – Box immer sichtbar (wenn berechtigt), auch außerhalb des Zeitfensters */}
       <div className="mt-6">
         <CycleConflictsBox
-          visible={cycleOk && (whoami?.is_raidlead || whoami?.is_elevated)}
+          visible={canSeeCycleBox}          // <- NICHT mehr an cycleOk gekoppelt
           currentRaidId={id}
-          signupsAll={signups}       // <- Roster + offene
+          signupsAll={signups}
           charMap={charMap}
-          userAssignments={userAssignments}
+          userAssignments={assignments}
         />
       </div>
 
-      {/* Status */}
+      {/* Checklist */}
+      <div className="mt-6"><ChecklistCard roster={roster} charMap={charMap} /></div>
+
       {busy ? <div className="mt-4 text-slate-400 text-sm">Lade…</div> : null}
       {err ? <div className="mt-4 text-rose-400 text-sm whitespace-pre-wrap">Fehler: {err}</div> : null}
     </div>

@@ -19,6 +19,7 @@ import {
   ensureMemberRaidleadFlag,
   hasElevatedRaidPermissions,
   renameRaidChannel,
+  deleteGuildChannel,        // <-- hinzugefügt: für Discord-Cleanup beim Löschen
 } from "./bot.js";
 import {
   listRaidleadsFromGuild,
@@ -441,6 +442,27 @@ export async function startServer() {
     } catch (e) {
       console.error("unpick route error:", e);
       res.status(500).json({ ok:false, error:"internal_error" });
+    }
+  });
+
+  /* 🔥 NEU: Raid löschen */
+  app.delete("/api/raids/:id", ensureAuth, async (req, res) => {
+    try {
+      const raidId = Number(req.params.id);
+      const raid = Raids.get(raidId);
+      await assertCanManageRaid(req.user.id, raid);
+
+      // Discord: Channel ggf. löschen (non-blocking)
+      try { if (raid?.channel_id) await deleteGuildChannel(raid.channel_id); } catch (e) { console.warn("deleteGuildChannel:", e?.message||e); }
+
+      // Datenbank: erst Signups, dann Raid
+      try { db.prepare(`DELETE FROM signups WHERE raid_id=?`).run(raidId); } catch {}
+      try { db.prepare(`DELETE FROM raids WHERE id=?`).run(raidId); } catch {}
+
+      return res.json({ ok: true, id: raidId });
+    } catch (e) {
+      const status = e?.status || 500;
+      return res.status(status).json({ ok: false, error: e?.message || "delete_failed" });
     }
   });
 
