@@ -124,9 +124,6 @@ function classEmoji(cls) {
   if (!cls) return "";
   const entry = CLASS_EMOJI[cls];
   if (entry?.id && entry?.name) return `<:${entry.name}:${entry.id}>`;
-
-  // Fallback: versuche "<:ClassOhneLeerzeichen:ID>" wenn es einen Eintrag nur mit ID gäbe
-  // oder einfach ":ClassOhneLeerzeichen:" (falls ein gleichnamiges Server-Emoji existiert)
   const token = String(cls).replace(/\s+/g, "");
   return `:${token}:`;
 }
@@ -527,6 +524,7 @@ async function notifyRaidleadPickedUnsign(raidId, byUserId, items, reason) {
     if (!leadUser) return;
 
     const when = raid.datetime ? `\`${raid.datetime}\`` : "`tba`";
+    thead
     const title = raid.title || `Raid #${raid.id}`;
 
     const lines = items.map((s) => {
@@ -550,6 +548,81 @@ async function notifyRaidleadPickedUnsign(raidId, byUserId, items, reason) {
     await leadUser.send({ content: msg }).catch(() => null);
   } catch (e) {
     console.warn("notifyRaidleadPickedUnsign:", e?.message || e);
+  }
+}
+
+/* =============================================================================
+   Roles / Permissions
+============================================================================= */
+
+async function getGuild() {
+  if (!_ready) await startBot();
+  const gid = process.env.GUILD_ID || CONFIG.guildId;
+  return getClient().guilds.fetch(gid);
+}
+
+export async function ensureMemberRaidleadFlag(discordUserId) {
+  try {
+    const guild = await getGuild();
+    const member = await guild.members.fetch(discordUserId).catch(() => null);
+    if (!member) return;
+
+    const raidleadRoleId = process.env.RAIDLEAD_ROLE_ID || "";
+    const hasRole = raidleadRoleId ? member.roles.cache.has(raidleadRoleId) : false;
+
+    const isOwner = guild.ownerId === member.id;
+    const perms   = member.permissions;
+    const isAdmin = perms?.has(PermissionsBitField.Flags.Administrator) || perms?.has(PermissionsBitField.Flags.ManageGuild);
+
+    const isRaidlead = hasRole || isOwner || isAdmin ? 1 : 0;
+    if (typeof Users?.setRaidlead === "function") {
+      Users.setRaidlead(discordUserId, isRaidlead);
+    }
+  } catch (e) {
+    console.warn("ensureMemberRaidleadFlag:", e?.message || e);
+  }
+}
+
+export async function hasElevatedRaidPermissions(discordUserId) {
+  try {
+    const guild = await getGuild();
+    const member = await guild.members.fetch(discordUserId).catch(() => null);
+    if (!member) return false;
+    const elevatedRoleId = process.env.ELEVATED_ROLE_ID || process.env.ELEVATGED_ROLE_ID || "";
+    if (elevatedRoleId && member.roles.cache.has(elevatedRoleId)) return true;
+    if (guild.ownerId === member.id) return true;
+    const perms = member.permissions;
+    if (perms?.has(PermissionsBitField.Flags.Administrator) || perms?.has(PermissionsBitField.Flags.ManageGuild)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/* =============================================================================
+   Channel Utilities
+============================================================================= */
+
+// Korrigierter Channelname: Tag-Kürzel + difficulty + loot + HHmm
+function buildChannelName(raid) {
+  try {
+    const dtStr = String(raid.datetime || "");
+    const d = new Date(dtStr.replace(" ", "T")); // lokale Zeit
+    const pad2 = (n) => String(n).padStart(2, "0");
+
+    const DAYS = ["so", "mo", "di", "mi", "do", "fr", "sa"];
+    const dayTag = !isNaN(d) ? DAYS[d.getDay()] : "so";
+
+    const hh = !isNaN(d) ? pad2(d.getHours()) : "00";
+    const mm = !isNaN(d) ? pad2(d.getMinutes()) : "00";
+
+    const diff = String(raid.difficulty || "normal").toLowerCase();
+    const loot = String(raid.loot_type || "unsaved").toLowerCase();
+
+    return `${dayTag}-${diff}-${loot}-${hh}${mm}`.slice(0, 90);
+  } catch {
+    const safe = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/--+/g, "-").slice(0, 90);
+    return safe(`raid-${raid?.id || ""}`);
   }
 }
 
@@ -654,6 +727,33 @@ export async function deleteGuildChannel(channelId) {
       return { ok: false, error: "missing permissions" };
     }
     console.warn(`⚠️ deleteGuildChannel(${channelId}) failed:`, msg);
+    return { ok: false, error: msg };
+  }
+}
+
+/* ---------- NEU: Channel beim Edit umbenennen (inkl. Topic) ---------- */
+export async function renameRaidChannel(raidId) {
+  try {
+    const raid = await Raids.get(raidId);
+    if (!raid?.channel_id) return { ok: true, info: "no channel for raid" };
+
+    const client = getClient();
+    if (!_ready) return { ok: false, error: "bot not ready" };
+
+    const ch = await client.channels.fetch(raid.channel_id).catch(() => null);
+    if (!ch) return { ok: false, error: "channel not found" };
+
+    const newName = buildChannelName(raid);
+    if (ch.name !== newName) {
+      await ch.setName(newName, "Raid updated");
+    }
+    const desiredTopic = `Raid ${raid.id} • ${raid.difficulty} • ${raid.loot_type}`;
+    try { if (ch.topic !== desiredTopic) await ch.setTopic(desiredTopic); } catch {}
+
+    return { ok: true, name: newName };
+  } catch (e) {
+    const msg = e?.message || String(e);
+    if (e?.code === 50013) return { ok: false, error: "missing permissions to rename channel" };
     return { ok: false, error: msg };
   }
 }
@@ -1058,77 +1158,6 @@ function wireUpInteractions(client) {
   });
 }
 
-/* =============================================================================
-   Roles / Permissions
-============================================================================= */
-
-async function getGuild() {
-  if (!_ready) await startBot();
-  const gid = process.env.GUILD_ID || CONFIG.guildId;
-  return getClient().guilds.fetch(gid);
-}
-
-export async function ensureMemberRaidleadFlag(discordUserId) {
-  try {
-    const guild = await getGuild();
-    const member = await guild.members.fetch(discordUserId).catch(() => null);
-    if (!member) return;
-
-    const raidleadRoleId = process.env.RAIDLEAD_ROLE_ID || "";
-    const hasRole = raidleadRoleId ? member.roles.cache.has(raidleadRoleId) : false;
-
-    const isOwner = guild.ownerId === member.id;
-    const perms   = member.permissions;
-    const isAdmin = perms?.has(PermissionsBitField.Flags.Administrator) || perms?.has(PermissionsBitField.Flags.ManageGuild);
-
-    const isRaidlead = hasRole || isOwner || isAdmin ? 1 : 0;
-    if (typeof Users?.setRaidlead === "function") {
-      Users.setRaidlead(discordUserId, isRaidlead);
-    }
-  } catch (e) {
-    console.warn("ensureMemberRaidleadFlag:", e?.message || e);
-  }
-}
-
-export async function hasElevatedRaidPermissions(discordUserId) {
-  try {
-    const guild = await getGuild();
-    const member = await guild.members.fetch(discordUserId).catch(() => null);
-    if (!member) return false;
-    const elevatedRoleId = process.env.ELEVATED_ROLE_ID || process.env.ELEVATGED_ROLE_ID || "";
-    if (elevatedRoleId && member.roles.cache.has(elevatedRoleId)) return true;
-    if (guild.ownerId === member.id) return true;
-    const perms = member.permissions;
-    if (perms?.has(PermissionsBitField.Flags.Administrator) || perms?.has(PermissionsBitField.Flags.ManageGuild)) return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-/* =============================================================================
-   Channel Utilities
-============================================================================= */
-
-function buildChannelName(raid) {
-  try {
-    const dtStr = raid.datetime || "";
-    const d = new Date(dtStr.replace(" ", "T"));
-    const tag = ["So","Mo","Di","Mi","Do","Fr","Sa"][isNaN(d) ? 0 : (d.getDay()+6)%7] || "So";
-    const hh = isNaN(d) ? "00" : String(d.getHours()).padStart(2,"0");
-    const mm = isNaN(d) ? "00" : String(d.getMinutes()).padStart(2,"0");
-    const diff = String(raid.difficulty || "Normal");
-    const loot = String(raid.loot_type || "").toUpperCase() || "UNSAVED";
-    return `${tag}-${diff}-${loot}-${hh}:${mm}`;
-  } catch {
-    const dt = (raid.datetime || "").replace(/[ :]/g, "-").replace(/--/g, "-");
-    const diff = String(raid.difficulty || "n");
-    const loot = String(raid.loot_type || "unsaved");
-    const safe = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 90);
-    return safe(`raid-${dt}-${diff}-${loot}`);
-  }
-}
-
 async function ensureRaidMessageFirstPost(channel, raid) {
   const fetched = await channel.messages.fetch({ limit: 50 }).catch(() => null);
   if (fetched) {
@@ -1148,3 +1177,5 @@ async function ensureRaidMessageFirstPost(channel, raid) {
   try { db.prepare("UPDATE raids SET message_id=? WHERE id=?").run(msg.id, raid.id); } catch {}
   return msg;
 }
+
+export { buildChannelName };

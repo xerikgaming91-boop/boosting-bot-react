@@ -18,6 +18,7 @@ import {
   postRaidAnnouncement,
   ensureMemberRaidleadFlag,
   hasElevatedRaidPermissions,
+  renameRaidChannel,
 } from "./bot.js";
 import {
   listRaidleadsFromGuild,
@@ -42,6 +43,7 @@ const distRoot = path.join(clientRoot, "dist");
 
 const LOOT_ALLOWED = new Set(["saved", "unsaved", "vip", "community"]);
 const BLOCKING_LOOT = new Set(["unsaved", "vip"]); // blockt pro Cycle
+const MIN_GAP_MINUTES = 90; // ❗ Zeitfenster für Pick-Block
 
 /* ───────────────────── Zeit/Cycle ───────────────────── */
 const pad = (n) => String(n).padStart(2, "0");
@@ -63,6 +65,28 @@ async function assertCanManageRaid(reqUserId, raid){
   if (elevated) return true;
   if (String(raid.created_by) === String(reqUserId)) return true;
   throw Object.assign(new Error("forbidden_not_owner"), { status: 403 });
+}
+
+/** Prüft Zeitfenster-Konflikt für einen User (± MIN_GAP_MINUTES um Zielraid). */
+function hasTimeWindowConflict({ targetRaidId, targetDt, userId, windowMinutes = MIN_GAP_MINUTES }) {
+  if (!userId || !targetDt) return false;
+  const start = new Date(targetDt.getTime() - Number(windowMinutes) * 60000);
+  const end   = new Date(targetDt.getTime() + Number(windowMinutes) * 60000);
+  const startStr = fmtDateTime(start);
+  const endStr   = fmtDateTime(end);
+
+  const rows = db.prepare(`
+    SELECT r.id, r.datetime
+    FROM signups s
+    JOIN raids r ON r.id = s.raid_id
+    WHERE s.user_id = ?
+      AND s.picked = 1
+      AND r.id != ?
+      AND r.datetime BETWEEN ? AND ?
+    ORDER BY r.datetime ASC
+  `).all(userId, targetRaidId, startStr, endStr);
+
+  return rows && rows.length > 0;
 }
 
 /* ───────────────────── Server ───────────────────── */
@@ -188,11 +212,11 @@ export async function startServer() {
   app.get("/api/raids/:id", ensureAuth, (req,res)=> res.json({ ok:true, data: attachLead(Raids.get(req.params.id)) }));
   app.get("/api/raids/:id/signups", ensureAuth, (req,res)=> res.json({ ok:true, data: Signups.listForRaidWithChars(req.params.id) }));
 
-  // Batch-Konflikt-Check: user_ids vs. Raid-Zeitpunkt (±window_minutes)
+  // Batch-Konflikt-Check für einen Satz User (Client nutzt das optional)
   app.post("/api/raids/:id/conflicts", ensureAuth, async (req, res) => {
     try {
       const id = req.params.id;
-      const { user_ids, window_minutes = 120 } = req.body || {};
+      const { user_ids, window_minutes = MIN_GAP_MINUTES } = req.body || {};
       const raid = Raids.get(id);
       if (!raid) return res.status(404).json({ ok: false, error: "not_found" });
 
@@ -265,7 +289,7 @@ export async function startServer() {
     } catch(e){ res.status(400).json({ ok:false, error:e.message }); }
   });
 
-  // Update raid (nur Owner/Admin; Admin darf owner wechseln)
+  // Update raid (Owner/Admin; Owner-Wechsel nur Admin)
   app.put("/api/raids/:id", ensureAuth, async (req,res)=>{
     try {
       const id=req.params.id;
@@ -292,8 +316,8 @@ export async function startServer() {
       const title=buildAutoTitle({ datetime, difficulty, loot_type });
       const updated = Raids.update({ ...exist, title, datetime, difficulty, loot_type, description: description||"", created_by: ownerId });
 
-      // Nur Embed aktualisieren, KEIN Roster-Post
-      try { await updateRaidMessage(id); /* await publishRoster(id); */ } catch(e){ console.warn("⚠️ updateRaidMessage:", e?.message||e); }
+      try { await updateRaidMessage(id); } catch(e){ console.warn("⚠️ updateRaidMessage:", e?.message||e); }
+      try { await renameRaidChannel(id); } catch(e){ console.warn("⚠️ renameRaidChannel:", e?.message||e); }
 
       res.json({ ok:true, data: attachLead(updated) });
     } catch(e){
@@ -301,37 +325,13 @@ export async function startServer() {
     }
   });
 
-  // Delete raid (nur Owner/Admin)
-  app.delete("/api/raids/:id", ensureAuth, async (req,res)=>{
-    try {
-      const id=req.params.id;
-      const r=Raids.get(id);
-      await assertCanManageRaid(req.user.id, r);
-
-      // Versuch Channel zu löschen
-      try {
-        if (r.channel_id) {
-          const guild = await (await import("./bot.js")).getClient().guilds.fetch(CONFIG.guildId);
-          const ch = await guild.channels.fetch(r.channel_id).catch(()=>null);
-          if (ch) await ch.delete(`Raid #${id} gelöscht`);
-        }
-      } catch(e){ console.warn("⚠️ Kanal löschen:", e?.message||e); }
-
-      Raids.delete(id);
-      res.json({ ok:true, message:"Raid erfolgreich gelöscht." });
-    } catch(e){
-      res.status(e?.status||400).json({ ok:false, error:e?.message||String(e) });
-    }
-  });
-
-  // Toggle pick/unpick (bestehende Route)
+  // Toggle pick/unpick (bestehende Route) – erweitert um Zeitfenster-Block
   app.post("/api/signups/:id/toggle-picked", ensureAuth, async (req,res)=>{
     const sId=req.params.id; const { picked } = req.body||{};
     const s=Signups.getById(sId); if(!s) return res.status(404).json({ ok:false, error:"signup_not_found" });
 
     const targetRaid=Raids.get(s.raid_id); if(!targetRaid) return res.status(404).json({ ok:false, error:"raid_not_found" });
 
-    // Besitzerprüfung
     try { await assertCanManageRaid(req.user.id, targetRaid); } 
     catch(e){ return res.status(e?.status||403).json({ ok:false, error: e?.message || "forbidden" }); }
 
@@ -340,10 +340,16 @@ export async function startServer() {
 
     try {
       if (picked) {
-        // Cycle-Konfliktprüfung
+        // ❗ Zeitfenster-Block
+        const tdt = parseDbDate(targetRaid.datetime) || new Date();
+        if (hasTimeWindowConflict({ targetRaidId: s.raid_id, targetDt: tdt, userId: s.user_id, windowMinutes: MIN_GAP_MINUTES })) {
+          return res.status(409).json({ ok:false, error:"time_window_conflict", minutes: MIN_GAP_MINUTES });
+        }
+
+        // Cycle-Konfliktprüfung (per Difficulty & Loot)
         const loot=String(targetRaid.loot_type||"").toLowerCase();
         if (BLOCKING_LOOT.has(loot)) {
-          const dt = parseDbDate(targetRaid.datetime) || new Date();
+          const dt = tdt;
           const sC = fmtDateTime(startOfCycle(dt)), eC = fmtDateTime(endOfCycle(dt));
           const diff = String(targetRaid.difficulty);
           const conflict = db.prepare(`
@@ -360,7 +366,7 @@ export async function startServer() {
         Signups.setExclusivePick(s.raid_id, s.user_id, s.id);
 
         if (["unsaved","vip"].includes(String(targetRaid.loot_type))) {
-          const dt = parseDbDate(targetRaid.datetime) || new Date();
+          const dt = tdt;
           const sC = fmtDateTime(startOfCycle(dt)), eC = fmtDateTime(endOfCycle(dt));
           const diff = String(targetRaid.difficulty);
           const affected = db.prepare(`
@@ -376,24 +382,18 @@ export async function startServer() {
             )
           `).run(s.character_id, s.raid_id, diff, sC, eC);
 
-          // Nur Embed aktualisieren in den betroffenen Raids
-          for (const rid of affected) { try { await updateRaidMessage(rid); /* await publishRoster(rid); */ } catch{} }
+          for (const rid of affected) { try { await updateRaidMessage(rid); } catch{} }
         }
       } else {
         Signups.setPicked(s.id, 0);
       }
 
-      // Nur Embed aktualisieren, KEIN Roster-Post
-      try { await updateRaidMessage(s.raid_id); /* await publishRoster(s.raid_id); */ } catch {}
+      try { await updateRaidMessage(s.raid_id); } catch {}
       res.json({ ok:true });
     } catch(e){ res.status(400).json({ ok:false, error:e?.message||"pick_failed" }); }
   });
 
-  /* NEU: Kompatible Routen, die dein Frontend erwartet:
-         /api/raids/:id/pick   und   /api/raids/:id/unpick
-     -> setzen picked-Flag, entfernen Anmeldung aus "Signups"-Embed,
-        aktualisieren NUR das bestehende Embed (KEIN Roster-Repost)
-  */
+  /* Kompatible Frontend-Routen */
   app.post("/api/raids/:id/pick", ensureAuth, async (req, res) => {
     try {
       const raidId = Number(req.params.id);
@@ -406,10 +406,13 @@ export async function startServer() {
       const raid = Raids.get(raidId);
       await assertCanManageRaid(req.user.id, raid);
 
-      // exklusiv für diesen User/ Raid picken
-      Signups.setExclusivePick(s.raid_id, s.user_id, s.id);
+      // ❗ Zeitfenster-Block
+      const tdt = parseDbDate(raid.datetime) || new Date();
+      if (hasTimeWindowConflict({ targetRaidId: raidId, targetDt: tdt, userId: s.user_id, windowMinutes: MIN_GAP_MINUTES })) {
+        return res.status(409).json({ ok:false, error:"time_window_conflict", minutes: MIN_GAP_MINUTES });
+      }
 
-      // Embed nur aktualisieren (kein Roster-Repost)
+      Signups.setExclusivePick(s.raid_id, s.user_id, s.id);
       try { await updateRaidMessage(s.raid_id); } catch {}
 
       return res.json({ ok:true });
@@ -432,7 +435,6 @@ export async function startServer() {
       await assertCanManageRaid(req.user.id, raid);
 
       Signups.setPicked(s.id, 0);
-
       try { await updateRaidMessage(s.raid_id); } catch {}
 
       return res.json({ ok:true });
@@ -441,6 +443,9 @@ export async function startServer() {
       res.status(500).json({ ok:false, error:"internal_error" });
     }
   });
+
+  /* ⬇️ Cycle-Infos (Konflikt-Anzeige) registrieren */
+  registerCycleRoutes(app);
 
   /* Static / SPA */
   if (isProd) {
@@ -475,8 +480,6 @@ export async function startServer() {
       });
     }
   }
-
-  
 
   app.listen(CONFIG.port, ()=> console.log(`🌐 Server läuft auf Port ${CONFIG.port} (${process.env.NODE_ENV||"dev"})`));
   const mod=await ensureSchedulerLoaded(); if (mod?.startCharacterSync) mod.startCharacterSync(); if (mod?.startPickRelease) mod.startPickRelease?.();
