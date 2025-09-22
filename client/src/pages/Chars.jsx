@@ -14,10 +14,14 @@ async function api(url, opts = {}) {
   return res.json();
 }
 
+function Message({type="info",children}){return (<div className={`p-3 rounded border ${type==="error"?"border-rose-600/50 bg-rose-950/30 text-rose-200":type==="success"?"border-emerald-600/50 bg-emerald-950/30 text-emerald-200":"border-slate-600/50 bg-slate-800/40 text-slate-200"}`}>{children}</div>);}
+
 export default function Chars() {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
+  const [notice, setNotice] = useState(null);
+  useEffect(()=>{ if(!notice) return; const t=setTimeout(()=>setNotice(null),3000); return ()=>clearTimeout(t);},[notice]);
 
   // Import-Form
   const [name, setName] = useState("");
@@ -50,6 +54,7 @@ export default function Chars() {
       });
       setName(""); setRealm(""); setRegion("eu");
       await load();
+      setNotice({type:"success",text:"Charakter importiert."});
     } catch (e) {
       setErr(e);
     } finally {
@@ -58,22 +63,21 @@ export default function Chars() {
   }
 
   async function onDelete(id) {
-    if (!confirm("Diesen Charakter löschen?")) return;
+    setErr(null);
     try {
       await api(`/api/me/chars/${id}/delete`, { method: "POST" });
       await load();
+      setNotice({type:"success",text:"Charakter wurde erfolgreich gelöscht."});
     } catch (e) {
-      alert(e.message || e);
+      setErr(e);
     }
   }
 
   return (
-    <div className="space-y-6">
-      {err ? (
-        <div className="p-3 rounded border border-rose-600/50 bg-rose-950/30 text-rose-200">
-          {String(err.message || err)}
-        </div>
-      ) : null}
+    <div className="space-y-6">{" "}
+      {notice ? (<Message type={notice.type}>{notice.text}</Message>) : null}
+
+      {err ? (<Message type="error">{String(err.message || err)}</Message>) : null}
 
       <section className="rounded-xl border border-slate-800 bg-slate-800/40 overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">

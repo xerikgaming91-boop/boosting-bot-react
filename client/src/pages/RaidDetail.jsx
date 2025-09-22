@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 
 /* ---------------------------------------------------------
@@ -148,6 +148,16 @@ function fromDatetimeLocalValue(localStr) {
 /* ---------------------------------------------------------
    UI Helpers
 --------------------------------------------------------- */
+function Message({ type = "info", children }) {
+  const cls =
+    type === "error"
+      ? "border-rose-600/50 bg-rose-950/30 text-rose-200"
+      : type === "success"
+      ? "border-emerald-600/50 bg-emerald-950/30 text-emerald-200"
+      : "border-slate-600/50 bg-slate-800/40 text-slate-200";
+  return <div className={`p-3 rounded border ${cls}`}>{children}</div>;
+}
+
 function RoleTitle({ role, text }) {
   const file = ROLE_ICON_FILE[role];
   return (
@@ -402,6 +412,15 @@ export default function RaidDetail() {
   const [charMap, setCharMap] = useState({});
   const [busy, setBusy] = useState(true);
   const [err, setErr] = useState("");
+
+  // Inline-Notices
+  const [notice, setNotice] = useState(null);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 3000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
   const [acting, setActing] = useState(false);
 
   // Edit
@@ -427,9 +446,14 @@ export default function RaidDetail() {
   const [assignments, setAssignments] = useState(() => new Map());
   const [cycleOk, setCycleOk] = useState(false);
 
+  // Live-Update
+  const pollRef = useRef(null);
+  const esRef = useRef(null);
+  const loadingRef = useRef(false);
+
   function fillEditFromRaid(r) {
     const dif = r?.difficulty || "";
-       const bosses = dif === "Mythic" ? (Number.isFinite(+r?.mythic_bosses) ? Number(r.mythic_bosses) : 0) : 8;
+    const bosses = dif === "Mythic" ? (Number.isFinite(+r?.mythic_bosses) ? Number(r.mythic_bosses) : 0) : 8;
     setEditState({
       datetimeLocal: toDatetimeLocalValue(r?.datetime || r?.date || r?.date_str),
       difficulty: dif,
@@ -440,20 +464,26 @@ export default function RaidDetail() {
     });
   }
 
-  async function loadAll() {
+  const loadAll = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     setErr("");
-    const raidRes = await apiGet(`/api/raids/${id}`);
-    const raidObj = raidRes?.raid || raidRes?.data || raidRes || null;
+    try {
+      const raidRes = await apiGet(`/api/raids/${id}`);
+      const raidObj = raidRes?.raid || raidRes?.data || raidRes || null;
 
-    const signupRes = await apiGet(`/api/raids/${id}/signups`);
-    const list = Array.isArray(signupRes?.list) ? signupRes.list : Array.isArray(signupRes) ? signupRes : signupRes?.data || [];
-    const cmap = signupRes?.charMap && typeof signupRes.charMap === "object" ? signupRes.charMap : {};
+      const signupRes = await apiGet(`/api/raids/${id}/signups`);
+      const list = Array.isArray(signupRes?.list) ? signupRes.list : Array.isArray(signupRes) ? signupRes : signupRes?.data || [];
+      const cmap = signupRes?.charMap && typeof signupRes.charMap === "object" ? signupRes.charMap : {};
 
-    setRaid(raidObj);
-    setSignups(list);
-    setCharMap(cmap);
-    if (raidObj) fillEditFromRaid(raidObj);
-  }
+      setRaid(raidObj);
+      setSignups(list);
+      setCharMap(cmap);
+      if (raidObj) fillEditFromRaid(raidObj);
+    } finally {
+      loadingRef.current = false;
+    }
+  }, [id]);
 
   async function loadWhoAmIAndPermissions(nextRaid) {
     try {
@@ -485,7 +515,7 @@ export default function RaidDetail() {
     }
   }
 
-  async function loadCycleAssignments() {
+  const loadCycleAssignments = useCallback(async () => {
     setCycleOk(false);
     try {
       const payload = await apiGet(`/api/raids/${id}/cycle-assignments`);
@@ -495,8 +525,9 @@ export default function RaidDetail() {
       setAssignments(new Map());
       setCycleOk(false);
     }
-  }
+  }, [id]);
 
+  // Initial load
   useEffect(() => {
     let dead = false;
     (async () => {
@@ -511,16 +542,11 @@ export default function RaidDetail() {
         if (!dead) setBusy(false);
       }
     })();
-    return () => {
-      dead = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+    return () => { dead = true; };
+  }, [id, loadAll, loadCycleAssignments]);
 
   useEffect(() => {
-    (async () => {
-      await loadRaidleadsIfAllowed();
-    })();
+    (async () => { await loadRaidleadsIfAllowed(); })();
   }, [whoami?.is_elevated]); // eslint-disable-line
 
   const roster = useMemo(() => signups.filter((s) => s.picked), [signups]);
@@ -563,7 +589,7 @@ export default function RaidDetail() {
   async function handlePick(s) {
     if (acting) return;
     if (hasTimeConflictForSignup(s)) {
-      alert(`Pick blockiert: Dieser User ist zeitlich zu nah an einem anderen Raid im aktuellen Cycle eingeplant (weniger als ${MIN_GAP_MINUTES} Minuten Abstand).`);
+      setNotice({ type: "error", text: `Pick blockiert: Dieser User ist zeitlich zu nah an einem anderen Raid im aktuellen Cycle eingeplant (weniger als ${MIN_GAP_MINUTES} Minuten Abstand).` });
       return;
     }
     setActing(true);
@@ -571,8 +597,9 @@ export default function RaidDetail() {
       await apiPost(`/api/raids/${id}/pick`, { signup_id: s.id });
       await loadAll();
       await loadCycleAssignments();
+      setNotice({ type: "success", text: "Gepickt." });
     } catch (e) {
-      alert(`Pick fehlgeschlagen: ${String(e.message || e)}`);
+      setNotice({ type: "error", text: `Pick fehlgeschlagen: ${String(e.message || e)}` });
     } finally {
       setActing(false);
     }
@@ -585,8 +612,9 @@ export default function RaidDetail() {
       await apiPost(`/api/raids/${id}/unpick`, { signup_id: s.id });
       await loadAll();
       await loadCycleAssignments();
+      setNotice({ type: "success", text: "Entfernt." });
     } catch (e) {
-      alert(`Unpick fehlgeschlagen: ${String(e.message || e)}`);
+      setNotice({ type: "error", text: `Unpick fehlgeschlagen: ${String(e.message || e)}` });
     } finally {
       setActing(false);
     }
@@ -616,6 +644,12 @@ export default function RaidDetail() {
     setSaveErr("");
     try {
       const bosses = editState.difficulty === "Mythic" ? editState.mythic_bosses : 8;
+
+      // 🔒 Mythic → kein "saved"
+      if (editState.difficulty === "Mythic" && editState.loot_type === "saved") {
+        throw new Error("Bei Mythic gibt es keinen 'Saved'-Lockout. Bitte anderen Loot-Typ wählen.");
+      }
+
       const payload = {
         title: buildTitle({ difficulty: editState.difficulty, bosses, lootType: editState.loot_type }),
         datetime: fromDatetimeLocalValue(editState.datetimeLocal),
@@ -646,6 +680,7 @@ export default function RaidDetail() {
       await loadAll();
       await loadWhoAmIAndPermissions();
       setEditMode(false);
+      setNotice({ type: "success", text: "Raid wurde erfolgreich bearbeitet." });
     } catch (e) {
       setSaveErr(String(e?.message || e));
     } finally {
@@ -660,13 +695,51 @@ export default function RaidDetail() {
     return buildTitle({ difficulty: raid.difficulty, bosses, lootType: raid.loot_type });
   }, [raid, id]);
 
-  // Sichtbarkeit der Box: Raidlead ODER Elevated ODER Owner (immer – unabhängig vom Cycle)
+  // Sichtbarkeit der Box: Raidlead ODER Elevated ODER Owner
   const canSeeCycleBox =
     (!!whoami && (whoami.is_raidlead || whoami.is_elevated)) ||
     (!!whoami && raid && String(raid.created_by) === String(whoami.id));
 
+  /* 🔴 Live-Updates (SSE + Fallback Polling) */
+  useEffect(() => {
+    const startPoll = () => {
+      stopPoll();
+      pollRef.current = window.setInterval(() => { if (!document.hidden) loadAll(); }, 10000);
+    };
+    const stopPoll = () => {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    };
+
+    try {
+      const es = new EventSource(`/api/raids/${id}/events`, { withCredentials: true });
+      esRef.current = es;
+      const onAny = () => loadAll();
+      es.addEventListener("message", onAny);
+      es.addEventListener("updated", onAny);
+      es.addEventListener("roster", onAny);
+      es.addEventListener("signups", onAny);
+      es.addEventListener("deleted", () => { window.location.href = "/raids"; });
+      es.onerror = () => { try { es.close(); } catch {} esRef.current = null; startPoll(); };
+      es.onopen = () => stopPoll();
+    } catch { startPoll(); }
+
+    const onVis = () => { if (!document.hidden) loadAll(); };
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      if (esRef.current) { try { esRef.current.close(); } catch {} esRef.current = null; }
+      stopPoll();
+    };
+  }, [id, loadAll]);
+
+  if (busy) return <div className="p-6">Lade…</div>;
+
   return (
     <div className="mx-auto max-w-[1200px] px-2 md:px-4">
+      {/* Inline Notice */}
+      {notice ? <div className="mb-4"><Message type={notice.type}>{notice.text}</Message></div> : null}
+
       {/* Kopf – Titel + Icon-Zeile */}
       <div className="bg-slate-800/60 rounded-xl p-4 mb-4 flex items-center justify-between">
         <div className="text-slate-100">
@@ -685,9 +758,7 @@ export default function RaidDetail() {
             <span>Signups: {open.length}</span>
           </div>
           {canEdit && !editMode ? (
-            <button className={btnGhost} onClick={startEdit} title="Raid bearbeiten">
-              Bearbeiten
-            </button>
+            <button className={btnGhost} onClick={startEdit} title="Raid bearbeiten">Bearbeiten</button>
           ) : null}
         </div>
       </div>
@@ -731,6 +802,8 @@ export default function RaidDetail() {
                     ...s,
                     difficulty: v,
                     mythic_bosses: v === "Mythic" ? s.mythic_bosses ?? 8 : 8,
+                    // Optional: Wenn Mythic gewählt → saved rausnehmen
+                    loot_type: v === "Mythic" && s.loot_type === "saved" ? "unsaved" : s.loot_type,
                   }));
                 }}
               >
@@ -771,10 +844,12 @@ export default function RaidDetail() {
                 onChange={(e) => setEditState((s) => ({ ...s, loot_type: e.target.value }))}
               >
                 <option value="">– wählen –</option>
-                {LOOT_OPTIONS.map((l) => (
-                  <option key={l} value={l}>{l}</option>
-                ))}
+                {(editState.difficulty === "Mythic" ? LOOT_OPTIONS.filter(l => l !== "saved") : LOOT_OPTIONS)
+                  .map((l) => (<option key={l} value={l}>{l}</option>))}
               </select>
+              {editState.difficulty === "Mythic" && (
+                <div className="text-[12px] text-slate-400 mt-1">Hinweis: Bei Mythic gibt es keinen „Saved“-Lockout.</div>
+              )}
             </div>
 
             {/* Beschreibung */}
@@ -802,7 +877,7 @@ export default function RaidDetail() {
             ) : null}
           </div>
 
-          {saveErr ? <div className="mt-3 text-sm text-rose-400 whitespace-pre-wrap">Fehler: {saveErr}</div> : null}
+          {saveErr ? <div className="mt-3"><Message type="error">Fehler: {saveErr}</Message></div> : null}
 
           <div className="mt-4 flex items-center gap-2">
             <button className={btnPrimary} onClick={saveEdit} disabled={saving}>
@@ -841,10 +916,10 @@ export default function RaidDetail() {
         </div>
       </div>
 
-      {/* Andere Raids – Box immer sichtbar (wenn berechtigt), auch außerhalb des Zeitfensters */}
+      {/* Andere Raids */}
       <div className="mt-6">
         <CycleConflictsBox
-          visible={canSeeCycleBox}          // <- NICHT mehr an cycleOk gekoppelt
+          visible={canSeeCycleBox}
           currentRaidId={id}
           signupsAll={signups}
           charMap={charMap}
@@ -856,7 +931,7 @@ export default function RaidDetail() {
       <div className="mt-6"><ChecklistCard roster={roster} charMap={charMap} /></div>
 
       {busy ? <div className="mt-4 text-slate-400 text-sm">Lade…</div> : null}
-      {err ? <div className="mt-4 text-rose-400 text-sm whitespace-pre-wrap">Fehler: {err}</div> : null}
+      {err ? <div className="mt-4"><Message type="error">Fehler: {err}</Message></div> : null}
     </div>
   );
 }

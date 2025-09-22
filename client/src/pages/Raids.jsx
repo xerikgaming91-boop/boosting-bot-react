@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import useWhoAmI from "../hooks/useWhoAmI.js";
 
@@ -40,6 +40,14 @@ function buildTitle({ base = "Manaforge", difficulty, bosses, lootType }) {
   return `${base} ${difficulty} ${b}/8 ${loot}`.replace(/\s{2,}/g, " ").trim();
 }
 
+function Message({type="info",children}) {
+  const cls =
+    type==="error" ? "border-rose-600/50 bg-rose-950/30 text-rose-200" :
+    type==="success" ? "border-emerald-600/50 bg-emerald-950/30 text-emerald-200" :
+    "border-slate-600/50 bg-slate-800/40 text-slate-200";
+  return <div className={`p-3 rounded border ${cls}`}>{children}</div>;
+}
+
 function Card({ title, children, right, id }) {
   return (
     <section id={id} className="rounded-xl border border-slate-800 bg-slate-800/40 overflow-hidden">
@@ -61,6 +69,8 @@ export default function Raids() {
 
   const [list, setList] = useState([]);
   const [err, setErr] = useState(null);
+  const [notice, setNotice] = useState(null);
+  useEffect(()=>{ if(!notice) return; const t=setTimeout(()=>setNotice(null),3000); return ()=>clearTimeout(t);},[notice]);
 
   // create form (Titel wird automatisch generiert)
   const [busy, setBusy] = useState(false);
@@ -75,13 +85,21 @@ export default function Raids() {
   const [createdBy, setCreatedBy] = useState("");
   const [loadLeadsBusy, setLoadLeadsBusy] = useState(false);
 
+  const loadingRef = useRef(false);
+  const pollRef = useRef(null);
+  const esRef = useRef(null);
+
   const load = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     setErr(null);
     try {
       const { data } = await api("/api/raids");
       setList(Array.isArray(data) ? data : []);
     } catch (e) {
       setErr(e);
+    } finally {
+      loadingRef.current = false;
     }
   }, []);
 
@@ -107,10 +125,81 @@ export default function Raids() {
     }
   }, [user, isAdmin, load, loadLeads]);
 
+  // 🔴 Live-Updates: SSE (falls vorhanden) + Fallback-Polling
+  useEffect(() => {
+    if (!user) return;
+
+    // helper: start polling
+    const startPoll = () => {
+      stopPoll();
+      const fn = async () => {
+        if (document.hidden) return; // Pause im Hintergrund
+        await load();
+      };
+      pollRef.current = window.setInterval(fn, 10000);
+    };
+    const stopPoll = () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+
+    // try SSE
+    try {
+      const es = new EventSource("/api/raids/events", { withCredentials: true });
+      esRef.current = es;
+      const onMsg = () => load();
+      es.addEventListener("message", onMsg);
+      es.addEventListener("raid", onMsg);
+      es.onerror = () => {
+        // wenn SSE nicht geht → auf Polling umschalten
+        try { es.close(); } catch {}
+        esRef.current = null;
+        startPoll();
+      };
+      es.onopen = () => {
+        // wenn SSE offen ist, kein Polling nötig
+        stopPoll();
+      };
+    } catch {
+      // kein SSE → Polling
+      startPoll();
+    }
+
+    const onVis = () => {
+      if (document.hidden) return;
+      load(); // beim Zurückkehren in den Tab sofort aktualisieren
+    };
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      if (esRef.current) {
+        try { esRef.current.close(); } catch {}
+        esRef.current = null;
+      }
+      stopPoll();
+    };
+  }, [user, load]);
+
   function toDbDate(localValue) {
     if (!localValue) return "";
     return localValue.replace("T", " ") + ":00";
   }
+
+  // Loot-Optionen je nach Difficulty (Mythic → ohne "Saved")
+  const lootOptions = useMemo(
+    () => (difficulty === "Mythic" ? LOOTS.filter(l => l.value !== "saved") : LOOTS),
+    [difficulty]
+  );
+
+  // Wenn auf Mythic gewechselt wird und "saved" gesetzt war → auf unsaved umstellen
+  useEffect(() => {
+    if (difficulty === "Mythic" && lootType === "saved") {
+      setLootType("unsaved");
+    }
+  }, [difficulty, lootType]);
 
   const titlePreview = useMemo(() => {
     const bosses = difficulty === "Mythic" ? mythicBosses : 8;
@@ -125,6 +214,10 @@ export default function Raids() {
 
       if (!difficulty) throw new Error("Bitte Difficulty wählen.");
       if (!lootType) throw new Error("Bitte Loot-Typ wählen.");
+      if (difficulty === "Mythic" && lootType === "saved") {
+        throw new Error("Bei Mythic gibt es keinen 'Saved'-Lockout. Bitte anderen Loot-Typ wählen.");
+      }
+
       const bosses = difficulty === "Mythic" ? mythicBosses : 8;
       if (difficulty === "Mythic" && (!Number.isInteger(+bosses) || +bosses < 0 || +bosses > 8)) {
         throw new Error("Bitte Mythic-Bossanzahl zwischen 0 und 8 setzen.");
@@ -161,12 +254,13 @@ export default function Raids() {
   }
 
   async function onDelete(id) {
-    if (!confirm("Diesen Raid wirklich löschen?")) return;
+    setErr(null);
     try {
       await api(`/api/raids/${id}`, { method: "DELETE" });
       await load();
+      setNotice({type:"success",text:"Raid wurde erfolgreich gelöscht."});
     } catch (e) {
-      alert(e.message || e);
+      setErr(e);
     }
   }
 
@@ -192,7 +286,6 @@ export default function Raids() {
               className="flex items-center justify-between rounded-lg border border-slate-800/80 bg-slate-900/40 px-4 py-3"
             >
               <div>
-                {/* ---> Hier jetzt der generierte Titel */}
                 <div className="font-medium">{displayTitle}</div>
                 <div className="text-xs text-slate-400">
                   📅 {r.datetime} • ⚔️ {r.difficulty}
@@ -236,16 +329,12 @@ export default function Raids() {
 
   return (
     <div className="space-y-6">
-      {err ? (
-        <div className="p-3 rounded border border-rose-600/50 bg-rose-950/30 text-rose-200">
-          {String(err.message || err)}
-        </div>
-      ) : null}
+      {notice ? (<Message type={notice.type}>{notice.text}</Message>) : null}
+      {err ? (<Message type="error">{String(err.message || err)}</Message>) : null}
 
       {canCreate && (
         <Card id="create" title="Neuen Raid erstellen">
           <form onSubmit={onCreate} className="grid gap-4">
-            {/* Titel-Vorschau (auto) */}
             <div>
               <label className="block text-sm text-slate-300 mb-1">Titel (automatisch)</label>
               <div className="w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-slate-100">
@@ -256,7 +345,6 @@ export default function Raids() {
               </p>
             </div>
 
-            {/* Datum + Difficulty */}
             <div className="grid md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm text-slate-300 mb-1">Datum &amp; Uhrzeit</label>
@@ -303,7 +391,6 @@ export default function Raids() {
               </div>
             </div>
 
-            {/* Loot-Type + Raidlead */}
             <div className="grid md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm text-slate-300 mb-1">Loot-Typ</label>
@@ -313,12 +400,17 @@ export default function Raids() {
                   onChange={(e) => setLootType(e.target.value)}
                   required
                 >
-                  {LOOTS.map((l) => (
+                  {(difficulty === "Mythic" ? LOOTS.filter(l=>l.value!=="saved") : LOOTS).map((l) => (
                     <option key={l.value} value={l.value}>
                       {l.label}
                     </option>
                   ))}
                 </select>
+                {difficulty === "Mythic" && (
+                  <div className="text-[12px] text-slate-400 mt-1">
+                    Hinweis: Bei Mythic gibt es keinen „Saved“-Lockout.
+                  </div>
+                )}
               </div>
 
               {isAdmin && (
@@ -345,7 +437,6 @@ export default function Raids() {
               )}
             </div>
 
-            {/* Beschreibung */}
             <div>
               <label className="block text-sm text-slate-300 mb-1">Beschreibung (optional)</label>
               <textarea
