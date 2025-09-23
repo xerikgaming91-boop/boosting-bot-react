@@ -524,7 +524,6 @@ async function notifyRaidleadPickedUnsign(raidId, byUserId, items, reason) {
     if (!leadUser) return;
 
     const when = raid.datetime ? `\`${raid.datetime}\`` : "`tba`";
-    thead
     const title = raid.title || `Raid #${raid.id}`;
 
     const lines = items.map((s) => {
@@ -603,7 +602,28 @@ export async function hasElevatedRaidPermissions(discordUserId) {
    Channel Utilities
 ============================================================================= */
 
-// Korrigierter Channelname: Tag-Kürzel + difficulty + loot + HHmm
+// 👇 NEU: Slug für Raidlead aus users.username (oder created_by) erzeugen
+function leadSlug(raid) {
+  let name = raid?.lead_name; // optional, falls schon mitgegeben
+  if (!name && raid?.created_by) {
+    try {
+      const row = db.prepare(`SELECT username FROM users WHERE discord_id = ? LIMIT 1`)
+        .get(String(raid.created_by));
+      if (row?.username) name = row.username;
+    } catch { /* ignore */ }
+  }
+  if (!name) name = String(raid?.created_by || "lead");
+  const slug = name
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+  return slug || "lead";
+}
+
+// Korrigierter Channelname: Tag-Kürzel + difficulty + loot + HHmm + -raidlead
 function buildChannelName(raid) {
   try {
     const dtStr = String(raid.datetime || "");
@@ -618,12 +638,82 @@ function buildChannelName(raid) {
 
     const diff = String(raid.difficulty || "normal").toLowerCase();
     const loot = String(raid.loot_type || "unsaved").toLowerCase();
+    const lead = leadSlug(raid); // 👈 anhängen
 
-    return `${dayTag}-${diff}-${loot}-${hh}${mm}`.slice(0, 90);
+    return `${dayTag}-${diff}-${loot}-${hh}${mm}-${lead}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/--+/g, "-").slice(0, 90);
   } catch {
     const safe = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/--+/g, "-").slice(0, 90);
-    return safe(`raid-${raid?.id || ""}`);
+    return safe(`raid-${raid?.id || ""}-${leadSlug(raid)}`);
   }
+}
+
+/* =============================================================================
+   Schedule-Helfer – Positionierung direkt bei Erstellung
+============================================================================= */
+
+function _sch_startOfCycle(d) {
+  const x = new Date(d || Date.now());
+  const wd = x.getDay(); // So=0..Sa=6, Mi=3
+  const s = new Date(x);
+  s.setHours(0, 0, 0, 0);
+  const diff = (wd - 3 + 7) % 7;
+  s.setDate(s.getDate() - diff);
+  return s;
+}
+function _sch_endOfCycle(d) {
+  const s = _sch_startOfCycle(d);
+  const e = new Date(s);
+  e.setDate(e.getDate() + 6);
+  e.setHours(23, 59, 59, 999);
+  return e;
+}
+function _sch_currentOrNextFor(dt) {
+  const now = new Date();
+  const curS = _sch_startOfCycle(now),
+    curE = _sch_endOfCycle(now);
+  const nextS = new Date(curS);
+  nextS.setDate(nextS.getDate() + 7);
+  const nextE = new Date(curE);
+  nextE.setDate(nextE.getDate() + 7);
+  return dt >= curS && dt <= curE ? "CURRENT" : dt >= nextS && dt <= nextE ? "NEXT" : null;
+}
+async function _sch_findScheduleCategory(guild) {
+  const byId = process.env.SCHEDULE_CATEGORY_ID || CONFIG.scheduleCategoryId || "";
+  if (byId) {
+    const cat = await guild.channels.fetch(byId).catch(() => null);
+    if (cat && cat.type === ChannelType.GuildCategory) return cat;
+  }
+  const byName = process.env.SCHEDULE_CATEGORY_NAME || "Weekly Raid Schedule";
+  return (
+    guild.channels.cache.find(
+      (c) => c.type === ChannelType.GuildCategory && c.name.toLowerCase() === byName.toLowerCase()
+    ) || null
+  );
+}
+function _sch_findMarkerChannel(guild, parentId, kind) {
+  const tag = `SCHEDULE:MARKER=${kind}`;
+  let ch = guild.channels.cache.find(
+    (c) => c.type === ChannelType.GuildText && c.parentId === parentId && (c.topic || "").includes(tag)
+  );
+  if (ch) return ch;
+  const prefer =
+    kind === "CURRENT"
+      ? process.env.SCHEDULE_CURRENT_NAME || "💰-current-id"
+      : process.env.SCHEDULE_NEXT_NAME || "🐣-next-id";
+  const variants = new Set([
+    prefer,
+    kind === "CURRENT" ? "💰-current-id" : "🐣-next-id",
+    kind === "CURRENT" ? "current-id" : "next-id",
+    kind === "CURRENT" ? "💰-current" : "🐣-next",
+    kind === "CURRENT" ? "current" : "next",
+  ]);
+  for (const name of variants) {
+    const f = guild.channels.cache.find(
+      (c) => c.type === ChannelType.GuildText && c.parentId === parentId && c.name === name
+    );
+    if (f) return f;
+  }
+  return null;
 }
 
 /* =============================================================================
@@ -638,14 +728,34 @@ export async function createRaidChannel(raid) {
   const guild = await client.guilds.fetch(guildId);
 
   const name = buildChannelName(raid);
-  const parentId = CONFIG.raidsCategoryId || process.env.RAIDS_CATEGORY_ID || null;
+
+  // bevorzugt: in Weekly Raid Schedule direkt unter passenden Marker erstellen
+  const dtStr = String(raid.datetime || "");
+  const dt = new Date(dtStr.replace(" ", "T"));
+  const scheduleCat = await _sch_findScheduleCategory(guild);
+  const which = !isNaN(dt) ? _sch_currentOrNextFor(dt) : null;
+  const marker = scheduleCat && which ? _sch_findMarkerChannel(guild, scheduleCat.id, which) : null;
+
+  // Fallback auf klassische Kategorie falls keine Schedule-Struktur gefunden wurde
+  const fallbackParentId = (CONFIG && CONFIG.raidsCategoryId) || process.env.RAIDS_CATEGORY_ID || null;
+  const parentId = scheduleCat?.id || fallbackParentId || null;
 
   const chan = await guild.channels.create({
     name,
     type: ChannelType.GuildText,
     parent: parentId || undefined,
     permissionOverwrites: [],
+    topic: `Raid ${raid.id} • ${raid.difficulty} • ${raid.loot_type}`,
   });
+
+  // wenn Schedule + Marker existiert: sofort direkt unter den Marker
+  if (scheduleCat && marker) {
+    try {
+      await chan.setPosition(marker.position + 1);
+    } catch {
+      /* ignorieren */
+    }
+  }
 
   await ensureRaidMessageFirstPost(chan, raid);
   return chan.id;
@@ -731,7 +841,7 @@ export async function deleteGuildChannel(channelId) {
   }
 }
 
-/* ---------- NEU: Channel beim Edit umbenennen (inkl. Topic) ---------- */
+/* ---------- Channel beim Edit umbenennen (inkl. Topic) ---------- */
 export async function renameRaidChannel(raidId) {
   try {
     const raid = await Raids.get(raidId);
