@@ -868,7 +868,9 @@ export async function postRaidAnnouncement(raid) {
 }
 
 export async function publishRoster(raidId) {
-  // NICHT automatisch posten – nur die bestehende Nachricht enthält ein Roster-Embed.
+  // 🔼 Erweiterung: Zusätzlichen Text-Post mit Mentions senden
+  try { await postRosterText(raidId); } catch (e) { console.warn("postRosterText:", e?.message || e); }
+  // Bestehende Embed-Nachricht weiterhin aktualisieren (Status quo)
   await updateRaidMessage(raidId);
 }
 

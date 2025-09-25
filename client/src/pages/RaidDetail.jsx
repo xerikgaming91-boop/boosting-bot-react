@@ -733,6 +733,24 @@ export default function RaidDetail() {
     };
   }, [id, loadAll]);
 
+  /* ---------------------------------------------------------
+     NEU: Roster im Channel posten
+     - ruft POST /api/raids/:id/post-roster
+  --------------------------------------------------------- */
+  async function postRosterToDiscord() {
+    if (!id) return;
+    setActing(true);
+    try {
+      const resp = await apiPost(`/api/raids/${id}/post-roster`, {});
+      if (resp && resp.ok === false) throw new Error(resp.error || "Fehler beim Posten");
+      setNotice({ type: "success", text: "Roster im Raid-Channel gepostet." });
+    } catch (e) {
+      setNotice({ type: "error", text: `Posten fehlgeschlagen: ${String(e?.message || e)}` });
+    } finally {
+      setActing(false);
+    }
+  }
+
   if (busy) return <div className="p-6">Lade…</div>;
 
   return (
@@ -758,7 +776,17 @@ export default function RaidDetail() {
             <span>Signups: {open.length}</span>
           </div>
           {canEdit && !editMode ? (
-            <button className={btnGhost} onClick={startEdit} title="Raid bearbeiten">Bearbeiten</button>
+            <>
+              <button
+                className={btnGhost}
+                onClick={postRosterToDiscord}
+                disabled={acting}
+                title="Roster im Channel posten"
+              >
+                Roster posten
+              </button>
+              <button className={btnGhost} onClick={startEdit} title="Raid bearbeiten">Bearbeiten</button>
+            </>
           ) : null}
         </div>
       </div>

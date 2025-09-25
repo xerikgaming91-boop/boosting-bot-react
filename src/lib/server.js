@@ -463,6 +463,21 @@ export async function startServer() {
     }
   });
 
+  /* -------------------------------------------------------
+     NEU: Roster im Channel posten/aktualisieren
+     (nutzt bestehende Funktion publishRoster, nichts ersetzt)
+  ------------------------------------------------------- */
+  app.post("/api/raids/:id/post-roster", ensureAuth, async (req, res) => {
+    try {
+      const raidId = Number(req.params.id);
+      if (!raidId) return res.status(400).json({ ok:false, error:"invalid raid id" });
+      await publishRoster(raidId);
+      res.json({ ok:true });
+    } catch(e) {
+      res.status(500).json({ ok:false, error: e?.message || "failed to post roster" });
+    }
+  });
+
   registerCycleRoutes(app);
 
   if (isProd) {
