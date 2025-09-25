@@ -509,6 +509,56 @@ async function buildRaidMessageFull(raid) {
 }
 
 /* =============================================================================
+   Text-Roster posten (Mentions) – plain text mit klickbaren <@id>, ohne Pings
+============================================================================= */
+export async function postRosterText(raidId, channelIdOverride) {
+  const raid = Raids.get ? await Raids.get(raidId) : db.prepare(`SELECT * FROM raids WHERE id=?`).get(raidId);
+  if (!raid) throw new Error("raid_not_found");
+
+  const all = typeof Signups?.listForRaidWithChars === "function"
+    ? Signups.listForRaidWithChars(raidId)
+    : db.prepare(`SELECT * FROM signups WHERE raid_id=?`).all(raidId);
+
+  const rows = await Promise.resolve(all);
+  const picked = rows.filter((s) => Number(s.picked) === 1);
+
+  const groups = {
+    tanks: picked.filter((s) => String(s.role||"").toLowerCase() === "tank").map((s) => s.user_id),
+    healers: picked.filter((s) => String(s.role||"").toLowerCase() === "healer").map((s) => s.user_id),
+    dps: picked.filter((s) => String(s.role||"").toLowerCase() === "dps").map((s) => s.user_id),
+    loot: picked.filter((s) => String(s.role||"").toLowerCase() === "lootbuddy").map((s) => s.user_id),
+  };
+
+  const total = picked.length;
+  const header = `**Current Roster (${total})** (`
+    + `${groups.tanks.length}x ${EMOJI.tank} | `
+    + `${groups.healers.length}x ${EMOJI.heal} | `
+    + `${groups.dps.length}x ${EMOJI.dps}`
+    + `${groups.loot.length ? ` | ${groups.loot.length}x ${EMOJI.loot}` : ""}`
+    + `)`;
+
+  const mk = (list, icon) => list.map((uid) => `${icon} <@${uid}>`).join("\n");
+  const parts = [];
+  if (groups.tanks.length)   parts.push(mk(groups.tanks, EMOJI.tank));
+  if (groups.healers.length) parts.push(mk(groups.healers, EMOJI.heal));
+  if (groups.dps.length)     parts.push(mk(groups.dps, EMOJI.dps));
+  if (groups.loot.length)    parts.push(mk(groups.loot, EMOJI.loot));
+
+  const footer = raid.created_by ? `\n\n<@${raid.created_by}>` : "";
+  const text = [header, parts.join("\n"), footer].filter(Boolean).join("\n");
+
+  const client = getClient();
+  const channelId = channelIdOverride || raid.channel_id || process.env.CHANNEL_ID;
+  if (!channelId) throw new Error("no_channel");
+  const ch = await client.channels.fetch(String(channelId)).catch(() => null);
+  if (!ch) throw new Error("channel_not_found");
+
+  const msg = await ch.send({ content: text, allowedMentions: { parse: [] } });
+  return msg?.id || null;
+}
+
+
+/* =============================================================================
    Benachrichtigung an Raidlead bei UNSIGN von PICKED
 ============================================================================= */
 
