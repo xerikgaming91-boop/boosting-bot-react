@@ -154,6 +154,8 @@ function Message({ type = "info", children }) {
       ? "border-rose-600/50 bg-rose-950/30 text-rose-200"
       : type === "success"
       ? "border-emerald-600/50 bg-emerald-950/30 text-emerald-200"
+      : type === "warn"
+      ? "border-amber-600/50 bg-amber-950/30 text-amber-100"
       : "border-slate-600/50 bg-slate-800/40 text-slate-200";
   return <div className={`p-3 rounded border ${cls}`}>{children}</div>;
 }
@@ -403,6 +405,149 @@ function CycleConflictsBox({ visible, currentRaidId, signupsAll, charMap, userAs
 }
 
 /* ---------------------------------------------------------
+   🔵 PCR Modal (Auto-Generator)
+--------------------------------------------------------- */
+function PcrModal({ open, onClose, raidId }) {
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [pcr, setPcr] = useState("");
+  const [lines, setLines] = useState([]);
+
+  const [form, setForm] = useState({
+    pot: "",
+    collector_id: "",
+    advertiser: "",
+    include: "picked",
+    extra_participants: "",
+    trailing_comma: true,
+  });
+
+  const canSubmit = String(form.pot).trim() !== "" && String(form.collector_id).trim() !== "";
+
+  function onChange(e) {
+    const { name, value, type, checked } = e.target;
+    setForm((f) => ({ ...f, [name]: type === "checkbox" ? !!checked : value }));
+  }
+
+  async function generate() {
+    if (!canSubmit) return;
+    setLoading(true); setErr(""); setPcr(""); setLines([]);
+    try {
+      const extra = (form.extra_participants || "").split(",").map(s=>s.trim()).filter(Boolean);
+      const body = {
+        pot: Number(form.pot),
+        collector_id: form.collector_id.trim(),
+        advertiser: form.advertiser.trim() || undefined,
+        include: form.include,
+        extra_participants: extra,
+        trailing_comma: !!form.trailing_comma,
+      };
+      const res = await fetch(`/api/raids/${raidId}/pcr`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok || !json?.ok) throw new Error(json?.error || "Fehler beim Erstellen des PCR");
+      setPcr(json.pcr || "");
+      setLines(json.lines || []);
+    } catch(e) {
+      setErr(String(e?.message||e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copyPCR() {
+    try { await navigator.clipboard.writeText(pcr); } catch {}
+  }
+
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="relative mx-4 w-full max-w-2xl rounded-2xl bg-slate-900 text-slate-100 shadow-xl ring-1 ring-white/10">
+        <div className="flex items-center justify-between border-b border-white/10 p-4">
+          <h3 className="text-lg font-semibold">PCR generieren</h3>
+          <button onClick={onClose} className="rounded-md bg-slate-800 px-3 py-1 text-sm hover:bg-slate-700">Schließen</button>
+        </div>
+        <div className="p-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs text-slate-400">Pot (Gold gesamt)</label>
+              <input name="pot" type="number" value={form.pot} onChange={onChange}
+                className="mt-1 w-full rounded-md border-0 bg-slate-800 px-3 py-2 text-sm ring-1 ring-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="z. B. 2250000" />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400">Collector (Discord-ID)</label>
+              <input name="collector_id" value={form.collector_id} onChange={onChange}
+                className="mt-1 w-full rounded-md border-0 bg-slate-800 px-3 py-2 text-sm ring-1 ring-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="z. B. 1228761152239046769" />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400">Advertiser (optional)</label>
+              <input name="advertiser" value={form.advertiser} onChange={onChange}
+                className="mt-1 w-full rounded-md border-0 bg-slate-800 px-3 py-2 text-sm ring-1 ring-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="Name (wir fügen |Adv| … hinzu)" />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400">Teilnehmer</label>
+              <select name="include" value={form.include} onChange={onChange}
+                className="mt-1 w-full rounded-md border-0 bg-slate-800 px-3 py-2 text-sm ring-1 ring-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <option value="picked">Nur gepickte (Roster)</option>
+                <option value="all">Alle Signups</option>
+              </select>
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-xs text-slate-400">Extra Teilnehmer (Komma-getrennt)</label>
+              <input name="extra_participants" value={form.extra_participants} onChange={onChange}
+                className="mt-1 w-full rounded-md border-0 bg-slate-800 px-3 py-2 text-sm ring-1 ring-white/10 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="z. B. Xemphy-Thrall, Foo-Bar" />
+            </div>
+            <label className="inline-flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" name="trailing_comma" checked={form.trailing_comma} onChange={onChange}
+                className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-indigo-600 focus:ring-indigo-600" />
+              Trailing comma (kompatibel zum Beispiel)
+            </label>
+          </div>
+
+          {err ? <div className="mt-3 rounded-md bg-rose-900/40 p-2 text-sm text-rose-200">{err}</div> : null}
+
+          <div className="mt-4 flex items-center gap-2">
+            <button onClick={generate} disabled={!canSubmit || loading}
+              className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium hover:bg-indigo-500 disabled:opacity-50">
+              {loading ? "Erzeuge…" : "PCR erzeugen"}
+            </button>
+            {pcr ? (
+              <button onClick={copyPCR}
+                className="rounded-md bg-slate-800 px-3 py-2 text-sm font-medium ring-1 ring-white/10 hover:bg-slate-700">
+                Kopieren
+              </button>
+            ) : null}
+          </div>
+
+          {pcr ? (
+            <div className="mt-4">
+              <label className="block text-xs text-slate-400 mb-1">PCR</label>
+              <textarea readOnly value={pcr} rows={8}
+                className="w-full resize-y rounded-md border-0 bg-slate-800 p-3 text-sm ring-1 ring-white/10" />
+              {Array.isArray(lines) && lines.length ? (
+                <details className="mt-2 text-sm text-slate-300">
+                  <summary className="cursor-pointer select-none text-slate-400">Einzelzeilen anzeigen</summary>
+                  <pre className="mt-2 whitespace-pre-wrap rounded-md bg-slate-800 p-3 ring-1 ring-white/10">{lines.join("\n")}</pre>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
    Seite
 --------------------------------------------------------- */
 export default function RaidDetail() {
@@ -450,6 +595,9 @@ export default function RaidDetail() {
   const pollRef = useRef(null);
   const esRef = useRef(null);
   const loadingRef = useRef(false);
+
+  // 🔵 PCR Modal State
+  const [pcrOpen, setPcrOpen] = useState(false);
 
   function fillEditFromRaid(r) {
     const dif = r?.difficulty || "";
@@ -562,7 +710,7 @@ export default function RaidDetail() {
   const rosterG = useMemo(() => groupByRole(roster), [roster]);
   const openG = useMemo(() => groupByRole(open), [open]);
 
-  /* ▼ NEU: Kapazitäten (Preset-Snapshot) + Belegt-Anzeige */
+  /* ▼ Preset-Kapazitäten + Belegt-Anzeige */
   const caps = useMemo(() => ({
     tank: Number(raid?.cap_tanks || 0),
     healer: Number(raid?.cap_healers || 0),
@@ -583,36 +731,25 @@ export default function RaidDetail() {
     return `${used}/${cap}`;
   }, [pickedCount, caps]);
 
+  /* ✅ Entschärfte Client-Heuristik: Nur Hinweis, keine Blockade */
   function hasTimeConflictForSignup(signup) {
-    if (!cycleOk || !raid) return false;
-    const currentStart = parseDate(raid?.datetime || raid?.date || raid?.date_str);
-    if (!currentStart) return false;
-
-    const key =
-      firstNonEmpty(
-        signup.user_id, signup.discord_id, signup.signup_discord_id, signup.discordId, signup.signup_user_id,
-        signup.owner_id, signup.ownerId, signup.uid, signup.userId, signup.member_id, signup.memberId, signup.account_id
-      ) || (signup.character_id && charMap[signup.character_id]?.user_id) || null;
-
-    if (!key) return false;
-
-    const info = assignments.get(String(key));
-    const list = info?.entries || [];
-    const others = list.filter((e) => String(e.raid_id) !== String(id));
-    for (const e of others) {
-      const t = parseDate(e.datetime);
-      if (!t) continue;
-      if (minutesDiff(currentStart, t) < MIN_GAP_MINUTES) return true;
+    if (typeof signup.picked_in_other !== "undefined") {
+      return !!signup.picked_in_other; // rein informativ
     }
-    return false;
+    return false; // Server entscheidet final
   }
 
   async function handlePick(s) {
     if (acting) return;
+
+    // Nur warnen, nicht blocken:
     if (hasTimeConflictForSignup(s)) {
-      setNotice({ type: "error", text: `Pick blockiert: Dieser User ist zeitlich zu nah an einem anderen Raid im aktuellen Cycle eingeplant (weniger als ${MIN_GAP_MINUTES} Minuten Abstand).` });
-      return;
+      setNotice({
+        type: "warn",
+        text: `Hinweis: Dieser Spieler könnte zeitnah in einem anderen Raid eingeplant sein. Der Server prüft final.`,
+      });
     }
+
     setActing(true);
     try {
       await apiPost(`/api/raids/${id}/pick`, { signup_id: s.id });
@@ -755,8 +892,7 @@ export default function RaidDetail() {
   }, [id, loadAll]);
 
   /* ---------------------------------------------------------
-     NEU: Roster im Channel posten
-     - ruft POST /api/raids/:id/post-roster
+     Roster im Channel posten
   --------------------------------------------------------- */
   async function postRosterToDiscord() {
     if (!id) return;
@@ -806,6 +942,15 @@ export default function RaidDetail() {
               >
                 Roster posten
               </button>
+              {/* 🔵 PCR-Button */}
+              <button
+                className={btnGhost}
+                onClick={() => setPcrOpen(true)}
+                disabled={acting}
+                title="PCR für diesen Raid generieren"
+              >
+                PCR generieren
+              </button>
               <button className={btnGhost} onClick={startEdit} title="Raid bearbeiten">Bearbeiten</button>
             </>
           ) : null}
@@ -851,7 +996,6 @@ export default function RaidDetail() {
                     ...s,
                     difficulty: v,
                     mythic_bosses: v === "Mythic" ? s.mythic_bosses ?? 8 : 8,
-                    // Optional: Wenn Mythic gewählt → saved rausnehmen
                     loot_type: v === "Mythic" && s.loot_type === "saved" ? "unsaved" : s.loot_type,
                   }));
                 }}
@@ -942,7 +1086,6 @@ export default function RaidDetail() {
       {/* Roster (geplant) */}
       <div className="bg-slate-800/60 rounded-xl p-4 mb-4">
         <div className="text-slate-100 font-semibold mb-2">Roster (geplant)</div>
-        {/* ▼ NEU: Slot-Anzeige x/y */}
         <div className="text-[12px] text-slate-300 mb-2">
           Tanks {countLabel("tank")} • Healers {countLabel("healer")} • DPS {countLabel("dps")} • Lootbuddies {countLabel("lootbuddy")}
         </div>
@@ -959,7 +1102,6 @@ export default function RaidDetail() {
       {/* Signups (offen) */}
       <div className="bg-slate-800/60 rounded-xl p-4 mb-4">
         <div className="text-slate-100 font-semibold mb-2">Signups (offen)</div>
-        {/* ▼ NEU: Slot-Anzeige x/y (gleiche Anzeige, bezieht sich auf geplante Roster-Belegung) */}
         <div className="text-[12px] text-slate-300 mb-2">
           Tanks {countLabel("tank")} • Healers {countLabel("healer")} • DPS {countLabel("dps")} • Lootbuddies {countLabel("lootbuddy")}
         </div>
@@ -989,6 +1131,9 @@ export default function RaidDetail() {
 
       {busy ? <div className="mt-4 text-slate-400 text-sm">Lade…</div> : null}
       {err ? <div className="mt-4"><Message type="error">Fehler: {err}</Message></div> : null}
+
+      {/* 🔵 PCR-Modal Mount */}
+      <PcrModal open={pcrOpen} onClose={() => setPcrOpen(false)} raidId={raid?.id || id} />
     </div>
   );
 }

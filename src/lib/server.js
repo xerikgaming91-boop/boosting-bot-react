@@ -39,7 +39,8 @@ import { rebuildScheduleBoards } from "./schedule.js";
 // Router
 import createPresetRoutes from "./presets.routes.js";      // /api/presets
 import usersRouter from "./routes/users.routes.js";        // /api/users ...
-import createCycleRoutes from "./cycle.routes.js";         // /api/raids/:id/cycle-assignments (bestehend)
+import createCycleRoutes from "./cycle.routes.js";         // /api/raids/:id/cycle-assignments
+import createPcrRoutes from "./pcr.routes.js";             // /api/raids/:id/pcr   ⬅️ NEU
 
 /* ---------------------------------------------------------
    Lazy Scheduler
@@ -183,6 +184,9 @@ export async function startServer() {
   // Cycle-Assignments (bestehende Datei / richtige Route)
   app.use(createCycleRoutes({ ensureAuth }));
 
+  // PCR-Generator (NEU)
+  app.use(createPcrRoutes({ ensureAuth }));
+
   /* -------- Static / Assets -------- */
   app.use("/assets", express.static(path.join(__dirname, "../client/assets")));
 
@@ -252,7 +256,7 @@ export async function startServer() {
   app.get("/api/raids", ensureAuth, (_req,res)=> res.json({ ok:true, data: Raids.list().map(attachLead) }));
   app.get("/api/raids/:id", ensureAuth, (req,res)=> res.json({ ok:true, data: attachLead(Raids.get(req.params.id)) }));
 
-  // ⬇︎ SIGNUPS – erweitert um picked_in_other
+  // ⬇︎ SIGNUPS – liefert picked_in_other & Referenzinfos für UI
   app.get("/api/raids/:id/signups", ensureAuth, (req,res)=> {
     try {
       const raidId = Number(req.params.id);
@@ -319,14 +323,13 @@ export async function startServer() {
     }
   });
 
-  // Konfliktprüfung – robuster & kompatibel
+  // Konfliktprüfung – explizit für bestimmte User-IDs (Server bleibt „hart“)
   app.post("/api/raids/:id/conflicts", ensureAuth, async (req, res) => {
     try {
       const id = req.params.id;
       const raid = Raids.get(id);
       if (!raid) return res.status(404).json({ ok: false, error: "not_found" });
 
-      // Einzeluser optional
       const qUser = req.query?.user_id ? [String(req.query.user_id)] : null;
       const { user_ids, window_minutes = MIN_GAP_MINUTES } = req.body || {};
       const setIds = qUser || user_ids || [];
@@ -454,7 +457,7 @@ export async function startServer() {
     }
   });
 
-  // Toggle picked – Logik unverändert, nur robuste Returns
+  // Toggle picked – Server bleibt die harte Instanz
   app.post("/api/signups/:id/toggle-picked", ensureAuth, async (req,res)=>{
     const sId=req.params.id; const { picked } = req.body||{};
     const s=Signups.getById(sId); if(!s) return res.status(404).json({ ok:false, error:"signup_not_found" });
@@ -576,7 +579,6 @@ export async function startServer() {
       const raidId = Number(req.params.id);
       const raid = Raids.get(raidId);
       if (!raid) {
-        // Bereits entfernt? Dann idempotent OK zurückgeben
         return res.json({ ok: true, id: raidId, note: "already_missing" });
       }
       await assertCanManageRaid(req.user.id, raid);
