@@ -1,141 +1,155 @@
 // src/lib/cycle.routes.js
-import { db, Users } from "./db.js";
+import express from "express";
+import { db, Raids } from "./db.js";
 
 /**
- * Liefert für einen Raid die Teilnehmer (Roster + offene Anmeldungen) und
- * für jeden Teilnehmer alle ANDEREN Raids, in denen er/sie bereits GE-PICKT ist.
- *
- * Response-Form:
- * [
- *   {
- *     user_id: "1234567890",
- *     user_name: "DiscordName",
- *     entries: [
- *       {
- *         raid_id: 42,
- *         title: "Manaforge Heroic 8/8 VIP",
- *         datetime: "2025-09-22 14:00:00",
- *         role: "dps" | "tank" | "healer" | "lootbuddy",
- *         char_name: "Synbeam",
- *         char_class: "Shaman"
- *       },
- *       ...
- *     ]
- *   },
- *   ...
- * ]
+ * Lokale Helfer – identisch zur Logik im Server:
  */
-export default function registerCycleRoutes(app) {
-  // kompatibel zu deinem Frontend: /api/raids/:id/cycle-assignments
-  app.get("/api/raids/:id/cycle-assignments", async (req, res) => {
-    try {
-      const raidId = Number(req.params.id);
-      if (!Number.isInteger(raidId)) {
-        return res.status(400).json({ ok: false, error: "invalid id" });
-      }
+const MIN_GAP_MINUTES = 90;
 
-      // 1) Alle Teilnehmer dieses Raids (Roster + offene Anmeldungen)
-      //    -> wir benötigen user_id; char_id nur für Anzeige
-      const cols = detectSignupColumns();
-      const charCol = cols.charCol || "character_id";
+const pad = (n) => String(n).padStart(2, "0");
+const fmtDateTime = (d) => {
+  const x = new Date(d);
+  return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())} ${pad(
+    x.getHours()
+  )}:${pad(x.getMinutes())}:${pad(x.getSeconds())}`;
+};
+function parseDbDate(s) {
+  if (!s) return null;
+  const d = new Date(String(s).replace(" ", "T"));
+  return isNaN(d) ? null : d;
+}
+function startOfCycle(dateLike) {
+  const d = new Date(dateLike);
+  const day = d.getDay(); // So=0 … Sa=6; Reset auf Mittwoch (3)
+  const start = new Date(d);
+  start.setHours(0, 0, 0, 0);
+  const diff = (day - 3 + 7) % 7;
+  start.setDate(start.getDate() - diff);
+  return start;
+}
+function endOfCycle(dateLike) {
+  const s = startOfCycle(dateLike);
+  const e = new Date(s);
+  e.setDate(e.getDate() + 6);
+  e.setHours(23, 59, 59, 999);
+  return e;
+}
 
-      const participants = db
-        .prepare(
-          `
-          SELECT s.user_id, s.role, s.${charCol} AS character_id
-          FROM signups s
-          WHERE s.raid_id = ?
-          GROUP BY s.user_id
-        `
-        )
-        .all(raidId);
+/**
+ * Kern: Liefert pro User die anderen (zeitlich/zyklisch kollidierenden)
+ * Raids, in denen er Pick/Signup hat – exakt im vom Frontend erwarteten Format.
+ */
+function buildCycleAssignmentsPayload(raidId) {
+  const raid = Raids.get(raidId);
+  if (!raid) throw Object.assign(new Error("not_found"), { status: 404 });
 
-      if (!participants || participants.length === 0) {
-        return res.json({ ok: true, data: [] });
-      }
+  const dt = parseDbDate(raid.datetime) || new Date();
+  const sC = fmtDateTime(startOfCycle(dt));
+  const eC = fmtDateTime(endOfCycle(dt));
+  const winStart = fmtDateTime(new Date(dt.getTime() - MIN_GAP_MINUTES * 60000));
+  const winEnd = fmtDateTime(new Date(dt.getTime() + MIN_GAP_MINUTES * 60000));
 
-      // 2) Für alle Teilnehmer alle ANDEREN Raids holen, in denen sie GE-PICKT sind.
-      const qPicked = db.prepare(
-        `
-        SELECT
-          r.id AS raid_id,
-          r.title,
-          r.datetime,
-          r.difficulty,
-          r.loot_type,
-          s.user_id,
-          s.role,
-          s.${charCol} AS character_id,
-          COALESCE(c.name, NULL)  AS char_name,
-          COALESCE(c.class, NULL) AS char_class
-        FROM signups s
-        JOIN raids r ON r.id = s.raid_id
-        LEFT JOIN characters c ON c.id = s.${charCol}
-        WHERE s.user_id = ?
-          AND s.picked = 1           -- <<< NUR gepickt!
-          AND r.id != ?              -- aktuellen Raid ausblenden
-        ORDER BY r.datetime ASC
+  // Alle Signups (Roster + offen) dieses Raids → user_ids
+  const currentSignups = db
+    .prepare(
       `
-      );
+      SELECT DISTINCT s.user_id
+      FROM signups s
+      WHERE s.raid_id = ?
+    `
+    )
+    .all(raidId);
 
-      const resultMap = new Map();
-      for (const p of participants) {
-        const list = qPicked.all(p.user_id, raidId).map((row) => ({
-          raid_id: row.raid_id,
-          title: row.title,
-          datetime: row.datetime,
-          role: normalizeRole(row.role),
-          char_name: row.char_name || null,
-          char_class: normalizeClass(row.char_class),
-        }));
+  const userIds = Array.from(
+    new Set(currentSignups.map((r) => String(r.user_id)).filter(Boolean))
+  );
+  if (!userIds.length) return [];
 
-        // Discord-Anzeigename, falls vorhanden
-        const uRec = Users.get(p.user_id);
-        const user_name = uRec?.username || null;
+  // Andere Raids der betroffenen User innerhalb des Fensters / Cycle-Blocks
+  const placeholders = userIds.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `
+      SELECT s2.user_id,
+             u.username AS user_name,
+             r2.id       AS raid_id,
+             r2.title    AS title,
+             r2.datetime AS datetime,
+             r2.difficulty,
+             r2.loot_type,
+             s2.role,
+             c.name      AS char_name,
+             c.class     AS char_class
+      FROM signups s2
+      JOIN raids r2             ON r2.id = s2.raid_id
+      LEFT JOIN users u         ON u.discord_id = s2.user_id
+      LEFT JOIN characters c    ON c.id = s2.character_id
+      WHERE s2.user_id IN (${placeholders})
+        AND s2.raid_id != ?
+        AND (
+              (r2.difficulty = ? AND r2.loot_type IN ('unsaved','vip') AND r2.datetime BETWEEN ? AND ?)
+           OR (r2.datetime BETWEEN ? AND ?)
+        )
+      ORDER BY r2.datetime ASC
+    `
+    )
+    .all(...userIds, raidId, raid.difficulty, sC, eC, winStart, winEnd);
 
-        resultMap.set(String(p.user_id), {
-          user_id: String(p.user_id),
-          user_name,
-          entries: list,
-        });
-      }
+  // In das Frontend-Format mappen:
+  // [{ user_id, user_name, entries: [{ raid_id, title, datetime, role, char_name, char_class }] }]
+  const map = new Map();
+  for (const r of rows) {
+    const uid = String(r.user_id);
+    if (!map.has(uid)) map.set(uid, { user_id: uid, user_name: r.user_name || "", entries: [] });
+    map.get(uid).entries.push({
+      raid_id: r.raid_id,
+      title: r.title,
+      datetime: r.datetime,
+      role: (r.role || "").toString().toLowerCase(),
+      char_name: r.char_name || "",
+      char_class: r.char_class || null,
+    });
+  }
+  return Array.from(map.values());
+}
 
-      const out = Array.from(resultMap.values());
-      return res.json({ ok: true, data: out });
+/**
+ * Router-Factory
+ * Hinweis: Wenn eure Pfade bereits mit '/api/...' beginnen (wie hier),
+ * dann in server.js OHNE Präfix mounten:  app.use(createCycleRoutes({ ensureAuth }));
+ */
+export default function createCycleRoutes({ ensureAuth }) {
+  const router = express.Router();
+
+  // Offizieller Pfad, den das UI normalerweise nutzt:
+  router.get("/api/raids/:id/cycle-assignments", ensureAuth, (req, res) => {
+    try {
+      const data = buildCycleAssignmentsPayload(Number(req.params.id));
+      res.json({ ok: true, data });
     } catch (e) {
-      console.error("cycle-assignments error:", e);
-      return res.status(500).json({ ok: false, error: "internal error" });
+      res.status(e?.status || 500).json({ ok: false, error: e?.message || String(e) });
     }
   });
 
-  // andere cycle-bezogene Routen können hier registriert bleiben/werden
-}
+  // Abwärtskompatible Aliase (falls ein älteres View sie aufruft)
+  router.get("/api/raids/:id/assignments", ensureAuth, (req, res) => {
+    try {
+      const data = buildCycleAssignmentsPayload(Number(req.params.id));
+      res.json({ ok: true, data });
+    } catch (e) {
+      res.status(e?.status || 500).json({ ok: false, error: e?.message || String(e) });
+    }
+  });
 
-/* ───────────────────────────── Helpers ───────────────────────────── */
+  router.get("/api/raids/:id/other-picks", ensureAuth, (req, res) => {
+    try {
+      const data = buildCycleAssignmentsPayload(Number(req.params.id));
+      res.json({ ok: true, data });
+    } catch (e) {
+      res.status(e?.status || 500).json({ ok: false, error: e?.message || String(e) });
+    }
+  });
 
-function detectSignupColumns() {
-  try {
-    const rows = db.prepare(`PRAGMA table_info(signups)`).all();
-    const cols = rows.map((r) => r.name);
-    const hasCharacterId = cols.includes("character_id");
-    const hasCharId = cols.includes("char_id");
-    return {
-      charCol: hasCharacterId ? "character_id" : hasCharId ? "char_id" : null,
-    };
-  } catch {
-    return { charCol: "character_id" };
-  }
-}
-
-function normalizeRole(r) {
-  const v = String(r || "").toLowerCase();
-  if (v === "heal") return "healer";
-  if (v === "lb" || v === "lootbuddies") return "lootbuddy";
-  return v || null;
-}
-
-function normalizeClass(c) {
-  if (!c) return null;
-  const s = String(c).trim();
-  return s;
+  return router;
 }

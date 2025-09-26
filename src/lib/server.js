@@ -37,8 +37,9 @@ import { buildAutoTitle } from "./format.js";
 import { rebuildScheduleBoards } from "./schedule.js";
 
 // Router
-import createPresetRoutes from "./presets.routes.js"; // enthält /api/presets …
-import usersRouter from "./routes/users.routes.js";   // robuste Users/Chars-API
+import createPresetRoutes from "./presets.routes.js";      // /api/presets
+import usersRouter from "./routes/users.routes.js";        // /api/users ...
+import createCycleRoutes from "./cycle.routes.js";         // /api/raids/:id/cycle-assignments (bestehend)
 
 /* ---------------------------------------------------------
    Lazy Scheduler
@@ -173,11 +174,14 @@ export async function startServer() {
 
   /* -------- Router mounten -------- */
 
-  // Presets: deine presets.routes.js hat Pfade wie /api/presets -> ohne Präfix mounten.
+  // Presets: /api/presets
   app.use(createPresetRoutes({ db, ensureAuth }));
 
-  // Users/Chars: unter /api mounten
+  // Users/Chars: /api/...
   app.use("/api", usersRouter);
+
+  // Cycle-Assignments (bestehende Datei / richtige Route)
+  app.use(createCycleRoutes({ ensureAuth }));
 
   /* -------- Static / Assets -------- */
   app.use("/assets", express.static(path.join(__dirname, "../client/assets")));
