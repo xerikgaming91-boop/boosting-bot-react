@@ -6,11 +6,12 @@ import { Strategy as DiscordStrategy } from "passport-discord";
 import path from "path";
 import fs from "fs/promises";
 import { fileURLToPath } from "url";
-import registerCycleRoutes from "./cycle.routes.js";
+
 import { CONFIG, assertRequiredEnv } from "./config.js";
-import { db, Users, Raids, Characters, Signups } from "./db.js";
+import { db, Users, Raids, Characters, Signups, Presets } from "./db.js";
 import { fetchFromRaiderIO } from "./raiderio.js";
 import { maybeAddWarcraftLogsInfo } from "./wcl.js";
+
 import {
   createRaidChannel,
   publishRoster,
@@ -20,17 +21,28 @@ import {
   hasElevatedRaidPermissions,
   renameRaidChannel,
   deleteGuildChannel,
+  postRosterText,
+  buildChannelName,
+  postRosterTemplateWithPresets,
 } from "./bot.js";
+
 import {
   listRaidleadsFromGuild,
   listRaidleadsFromDb,
   listAllRoles,
   debugCurrentRaidleadRole,
 } from "./raidleads.js";
+
 import { buildAutoTitle } from "./format.js";
-// ⬇️ NEU: Schedule pro Raid-Kanalverwaltung (Current/Next)
 import { rebuildScheduleBoards } from "./schedule.js";
 
+// Router
+import createPresetRoutes from "./presets.routes.js"; // enthält /api/presets …
+import usersRouter from "./routes/users.routes.js";   // robuste Users/Chars-API
+
+/* ---------------------------------------------------------
+   Lazy Scheduler
+--------------------------------------------------------- */
 let _scheduler = null;
 async function ensureSchedulerLoaded() {
   if (_scheduler) return _scheduler;
@@ -39,6 +51,9 @@ async function ensureSchedulerLoaded() {
   return _scheduler;
 }
 
+/* ---------------------------------------------------------
+   Helpers / Konstanten
+--------------------------------------------------------- */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientRoot = path.resolve(process.cwd(), "client");
 const distRoot = path.join(clientRoot, "dist");
@@ -67,6 +82,7 @@ async function assertCanManageRaid(reqUserId, raid){
   throw Object.assign(new Error("forbidden_not_owner"), { status: 403 });
 }
 
+/** Prüft Zeitfenster-Konflikt ±windowMinutes zu targetDt für userId. */
 function hasTimeWindowConflict({ targetRaidId, targetDt, userId, windowMinutes = MIN_GAP_MINUTES }) {
   if (!userId || !targetDt) return false;
   const start = new Date(targetDt.getTime() - Number(windowMinutes) * 60000);
@@ -88,6 +104,9 @@ function hasTimeWindowConflict({ targetRaidId, targetDt, userId, windowMinutes =
   return rows && rows.length > 0;
 }
 
+/* ---------------------------------------------------------
+   Server
+--------------------------------------------------------- */
 export async function startServer() {
   try { assertRequiredEnv(); } catch (e) { console.error("ENV-Fehler:", e.message); }
 
@@ -104,7 +123,7 @@ export async function startServer() {
     cookie: { sameSite: "lax" },
   }));
 
-  /* Passport */
+  /* -------- Auth / Passport -------- */
   passport.use(new DiscordStrategy({
       clientID: CONFIG.discordClientId,
       clientSecret: CONFIG.discordClientSecret,
@@ -113,7 +132,12 @@ export async function startServer() {
     },
     async (_a,_r,profile,done)=>{
       try {
-        Users.upsert({ discord_id: profile.id, username: profile.username, avatar: profile.avatar, is_raidlead: 0 });
+        Users.upsert({
+          discord_id: profile.id,
+          username: profile.username,
+          avatar: profile.avatar,
+          is_raidlead: 0,
+        });
         return done(null, { id: profile.id, username: profile.username });
       } catch (e) { return done(e); }
     }
@@ -123,26 +147,12 @@ export async function startServer() {
   app.use(passport.initialize());
   app.use(passport.session());
 
-  /* Auth middlewares */
-  const ensureAuth = (req,res,next)=> req.isAuthenticated()? next(): res.status(401).json({ ok:false, error:"unauthorized" });
-  const requireRaidlead = async (req,res,next)=>{
-    if(!req.isAuthenticated()) return res.status(401).json({ ok:false, error:"unauthorized" });
-    try { await ensureMemberRaidleadFlag(req.user.id); } catch {}
-    const u=Users.get(req.user.id); const elevated=await isElevated(req.user.id);
-    return (u?.is_raidlead || elevated) ? next() : res.status(403).json({ ok:false, error:"raidlead_required" });
-  };
-  const requireElevated = async (req,res,next)=>{
-    if(!req.isAuthenticated()) return res.status(401).json({ ok:false, error:"unauthorized" });
-    const elevated=await isElevated(req.user.id);
-    return elevated? next() : res.status(403).json({ ok:false, error:"elevated_required" });
-  };
-
-  /* Auth routes */
   const computeRedirect=(req)=> {
     const proto=(req.headers["x-forwarded-proto"]||req.protocol||"http").split(",")[0].trim();
     const host=req.headers["x-forwarded-host"]||req.get("host");
     return `${proto}://${host}/auth/callback`;
   };
+
   app.get("/login",(req,res,next)=> passport.authenticate("discord",{ callbackURL: computeRedirect(req) })(req,res,next));
   app.get("/auth/callback",
     (req,res,next)=> passport.authenticate("discord",{ failureRedirect:"/", callbackURL: computeRedirect(req) })(req,res,next),
@@ -150,17 +160,40 @@ export async function startServer() {
   );
   app.get("/logout",(req,res)=>{ req.logout(()=>{}); res.redirect("/"); });
 
-  if (CONFIG.devAllowSelfRaidlead) {
-    app.post("/api/dev/become-raidlead", ensureAuth, (req,res)=>{ Users.setRaidlead(req.user.id,1); res.json({ ok:true }); });
+  // Auth-Middlewares
+  function ensureAuth(req, res, next) {
+    if (req.isAuthenticated && req.isAuthenticated()) return next();
+    res.status(401).json({ ok:false, error:"unauthorized" });
+  }
+  async function requireElevated(req,res,next){
+    if(!req.isAuthenticated || !req.isAuthenticated()) return res.status(401).json({ ok:false, error:"unauthorized" });
+    const elevated=await isElevated(req.user.id);
+    return elevated? next() : res.status(403).json({ ok:false, error:"elevated_required" });
   }
 
+  /* -------- Router mounten -------- */
+
+  // Presets: deine presets.routes.js hat Pfade wie /api/presets -> ohne Präfix mounten.
+  app.use(createPresetRoutes({ db, ensureAuth }));
+
+  // Users/Chars: unter /api mounten
+  app.use("/api", usersRouter);
+
+  /* -------- Static / Assets -------- */
+  app.use("/assets", express.static(path.join(__dirname, "../client/assets")));
+
+  /* -------- WhoAmI -------- */
   app.get("/api/whoami", async (req,res)=>{
     let u=null, elevated=false;
-    if (req.isAuthenticated()) { try { await ensureMemberRaidleadFlag(req.user.id); } catch {}; u=Users.get(req.user.id); elevated=await isElevated(req.user.id); }
+    if (req.isAuthenticated && req.isAuthenticated()) {
+      try { await ensureMemberRaidleadFlag(req.user.id); } catch {}
+      u=Users.get(req.user.id);
+      elevated=await isElevated(req.user.id);
+    }
     res.json({ ok:true, user: u? { id:u.discord_id, username:u.username, is_raidlead:!!u.is_raidlead, is_elevated:!!elevated } : null });
   });
 
-  /* Raidlead-Liste (Admin) + Debug */
+  /* -------- Admin: Raidlead-Infos -------- */
   app.get("/api/admin/raidleads", ensureAuth, requireElevated, async (_req,res)=>{
     try {
       const g = await listRaidleadsFromGuild({ debug:false });
@@ -176,8 +209,11 @@ export async function startServer() {
     catch(e){ res.status(500).json({ ok:false, error:e?.message||String(e) }); }
   });
 
-  /* Characters */
-  app.get("/api/me/chars", ensureAuth, (req,res)=> res.json({ ok:true, data: Characters.listByUser(req.user.id) }));
+  /* -------- Characters (Self) -------- */
+  app.get("/api/me/chars", ensureAuth, (req,res)=> {
+    try { res.json({ ok:true, data: Characters.listByUser(req.user.id) }); }
+    catch(e){ res.status(500).json({ ok:false, error:e?.message||String(e) }); }
+  });
   app.post("/api/me/chars/import", ensureAuth, async (req,res)=>{
     try {
       let { name, realm, region } = req.body;
@@ -189,9 +225,12 @@ export async function startServer() {
       res.json({ ok:true });
     } catch(e){ res.status(400).json({ ok:false, error:e.message }); }
   });
-  app.post("/api/me/chars/:id/delete", ensureAuth, (req,res)=>{ Characters.delete(req.params.id); res.json({ ok:true }); });
+  app.post("/api/me/chars/:id/delete", ensureAuth, (req,res)=>{
+    try { Characters.delete(req.params.id); res.json({ ok:true }); }
+    catch(e){ res.status(500).json({ ok:false, error:e?.message||String(e) }); }
+  });
 
-  /* Meine geplanten Raids */
+  /* -------- Meine geplanten Raids -------- */
   app.get("/api/me/raids", ensureAuth, (req,res)=>{
     const rows = db.prepare(`
       SELECT r.*, s.role, s.slot,
@@ -205,27 +244,94 @@ export async function startServer() {
     res.json({ ok:true, data: rows });
   });
 
-  /* Raids – Booster dürfen sehen; bearbeiten nur Owner/Admin */
+  /* -------- Raids (CRUD + Signups) -------- */
   app.get("/api/raids", ensureAuth, (_req,res)=> res.json({ ok:true, data: Raids.list().map(attachLead) }));
   app.get("/api/raids/:id", ensureAuth, (req,res)=> res.json({ ok:true, data: attachLead(Raids.get(req.params.id)) }));
-  app.get("/api/raids/:id/signups", ensureAuth, (req,res)=> res.json({ ok:true, data: Signups.listForRaidWithChars(req.params.id) }));
 
-  // Batch-Konflikt-Check (optional)
+  // ⬇︎ SIGNUPS – erweitert um picked_in_other
+  app.get("/api/raids/:id/signups", ensureAuth, (req,res)=> {
+    try {
+      const raidId = Number(req.params.id);
+      const raid    = Raids.get(raidId);
+      if (!raid) return res.status(404).json({ ok:false, error:"not_found" });
+
+      const dt = parseDbDate(raid.datetime) || new Date();
+      const sC = fmtDateTime(startOfCycle(dt));
+      const eC = fmtDateTime(endOfCycle(dt));
+
+      const rows = db.prepare(`
+        SELECT s.*, 
+               c.name  AS char_name, 
+               c.class AS char_class, 
+               c.spec  AS char_spec, 
+               c.wcl_url AS char_wcl_url,
+               -- Flag: derselbe Charakter ist in einem anderen Raid bereits picked (im gleichen Cycle bei unsaved/vip ODER im 90-Minuten-Fenster)
+               EXISTS(
+                 SELECT 1 FROM signups s2 
+                 JOIN raids r2 ON r2.id = s2.raid_id
+                 WHERE s2.character_id = s.character_id
+                   AND s2.picked = 1
+                   AND s2.raid_id != s.raid_id
+                   AND (
+                        -- Cycle-Block für unsaved/vip gleicher Difficulty
+                        (r2.difficulty = r.difficulty AND r2.loot_type IN ('unsaved','vip') 
+                         AND r2.datetime BETWEEN ? AND ?) 
+                        OR
+                        -- Zeitfenster-Konflikt ±90min
+                        (r2.datetime BETWEEN ? AND ?)
+                   )
+               ) AS picked_in_other,
+               (
+                 SELECT r2.id FROM signups s2 
+                 JOIN raids r2 ON r2.id = s2.raid_id
+                 WHERE s2.character_id = s.character_id
+                   AND s2.picked = 1
+                   AND s2.raid_id != s.raid_id
+                 ORDER BY r2.datetime DESC LIMIT 1
+               ) AS picked_other_raid_id,
+               (
+                 SELECT r2.datetime FROM signups s2 
+                 JOIN raids r2 ON r2.id = s2.raid_id
+                 WHERE s2.character_id = s.character_id
+                   AND s2.picked = 1
+                   AND s2.raid_id != s.raid_id
+                 ORDER BY r2.datetime DESC LIMIT 1
+               ) AS picked_other_dt
+        FROM signups s
+        JOIN raids r ON r.id = s.raid_id
+        LEFT JOIN characters c ON c.id = s.character_id
+        WHERE s.raid_id = ?
+        ORDER BY s.role ASC, s.slot ASC, s.id ASC
+      `).all(
+        sC, eC,
+        fmtDateTime(new Date((dt.getTime() - MIN_GAP_MINUTES*60000))),
+        fmtDateTime(new Date((dt.getTime() + MIN_GAP_MINUTES*60000))),
+        raidId
+      );
+
+      res.json({ ok:true, data: rows });
+    } catch(e){
+      res.status(500).json({ ok:false, error:e?.message||String(e) });
+    }
+  });
+
+  // Konfliktprüfung – robuster & kompatibel
   app.post("/api/raids/:id/conflicts", ensureAuth, async (req, res) => {
     try {
       const id = req.params.id;
-      const { user_ids, window_minutes = MIN_GAP_MINUTES } = req.body || {};
       const raid = Raids.get(id);
       if (!raid) return res.status(404).json({ ok: false, error: "not_found" });
 
-      const dt = parseDbDate(raid.datetime);
+      // Einzeluser optional
+      const qUser = req.query?.user_id ? [String(req.query.user_id)] : null;
+      const { user_ids, window_minutes = MIN_GAP_MINUTES } = req.body || {};
+      const setIds = qUser || user_ids || [];
+      const unique = Array.from(new Set(setIds.map(String)));
+      const dt = parseDbDate(raid.datetime) || new Date();
       const start = new Date(dt.getTime() - Number(window_minutes) * 60000);
-      const end = new Date(dt.getTime() + Number(window_minutes) * 60000);
+      const end   = new Date(dt.getTime() + Number(window_minutes) * 60000);
       const startStr = fmtDateTime(start);
-      const endStr = fmtDateTime(end);
-
-      const unique = Array.from(new Set((user_ids || []).map(String)));
-      const out = {};
+      const endStr   = fmtDateTime(end);
 
       const stmt = db.prepare(`
         SELECT r.id, r.title, r.datetime, r.difficulty, r.loot_type, s.role
@@ -238,19 +344,24 @@ export async function startServer() {
         ORDER BY r.datetime ASC
       `);
 
+      const outMap = {};
+      const outArr = [];
       for (const uid of unique) {
-        out[uid] = stmt.all(uid, id, startStr, endStr);
+        const rows = stmt.all(uid, id, startStr, endStr);
+        outMap[uid] = rows;
+        outArr.push({ user_id: uid, conflicts: rows });
       }
-      res.json({ ok: true, data: out, window_minutes: Number(window_minutes) });
+
+      res.json({ ok: true, data: outMap, map: outMap, array: outArr, window_minutes: Number(window_minutes) });
     } catch (e) {
       res.status(500).json({ ok: false, error: e?.message || String(e) });
     }
   });
 
-  // Create raid
+  // Create raid (Preset-Snapshot optional)
   app.post("/api/raids", ensureAuth, async (req,res)=>{
     try {
-      const { datetime, difficulty, loot_type, description, created_by } = req.body||{};
+      const { datetime, difficulty, loot_type, description, created_by, run_type, title, preset_id } = req.body||{};
       if(!datetime||!difficulty||!loot_type) throw new Error("Pflichtfelder fehlen.");
       if(!LOOT_ALLOWED.has(String(loot_type))) throw new Error("Ungültiger loot_type.");
 
@@ -270,8 +381,23 @@ export async function startServer() {
         ownerId = created_by;
       }
 
-      const title = buildAutoTitle({ datetime, difficulty, loot_type });
-      const raid = Raids.create({ title, datetime, difficulty, run_type:"Raid", loot_type, description: description||"", created_by: ownerId });
+      const autoTitle = title && title.trim() ? title.trim() : buildAutoTitle({ datetime, difficulty, loot_type });
+      const raid = Raids.create({ title: autoTitle, datetime, difficulty, run_type: run_type||"Raid", loot_type, description: description||"", created_by: ownerId });
+
+      // optional Preset-Snapshot übernehmen
+      if (preset_id) {
+        const p = Presets.get(preset_id);
+        if (p) {
+          Raids.update({
+            id: raid.id,
+            preset_id: p.id,
+            cap_tanks: p.tanks,
+            cap_healers: p.healers ?? p.heals,
+            cap_dps: p.dps,
+            cap_lootbuddies: p.lootbuddies ?? p.loot,
+          });
+        }
+      }
 
       try {
         const chId = await createRaidChannel(raid);
@@ -281,7 +407,6 @@ export async function startServer() {
         }
       } catch(e){ console.warn("⚠️ createRaidChannel/postRaidAnnouncement:", e?.message||e); }
 
-      // ⬇️ Schedule synchronisieren (Current/Next; pro Raid-Kanal)
       try { rebuildScheduleBoards().catch(()=>{}); } catch {}
 
       res.json({ ok:true, data: attachLead(Raids.get(raid.id)) });
@@ -317,7 +442,6 @@ export async function startServer() {
       try { await updateRaidMessage(id); } catch(e){ console.warn("⚠️ updateRaidMessage:", e?.message||e); }
       try { await renameRaidChannel(id); } catch(e){ console.warn("⚠️ renameRaidChannel:", e?.message||e); }
 
-      // ⬇️ Schedule synchronisieren
       try { rebuildScheduleBoards().catch(()=>{}); } catch {}
 
       res.json({ ok:true, data: attachLead(updated) });
@@ -326,7 +450,7 @@ export async function startServer() {
     }
   });
 
-  // Toggle picked
+  // Toggle picked – Logik unverändert, nur robuste Returns
   app.post("/api/signups/:id/toggle-picked", ensureAuth, async (req,res)=>{
     const sId=req.params.id; const { picked } = req.body||{};
     const s=Signups.getById(sId); if(!s) return res.status(404).json({ ok:false, error:"signup_not_found" });
@@ -392,7 +516,7 @@ export async function startServer() {
     } catch(e){ res.status(400).json({ ok:false, error:e?.message||"pick_failed" }); }
   });
 
-  // Kompatible Pick/Unpick-Endpoints
+  // Pick/Unpick kompatible Endpoints
   app.post("/api/raids/:id/pick", ensureAuth, async (req, res) => {
     try {
       const raidId = Number(req.params.id);
@@ -442,18 +566,26 @@ export async function startServer() {
     }
   });
 
-  // Raid löschen
+  // Raid löschen – stabilisiert
   app.delete("/api/raids/:id", ensureAuth, async (req, res) => {
     try {
       const raidId = Number(req.params.id);
       const raid = Raids.get(raidId);
+      if (!raid) {
+        // Bereits entfernt? Dann idempotent OK zurückgeben
+        return res.json({ ok: true, id: raidId, note: "already_missing" });
+      }
       await assertCanManageRaid(req.user.id, raid);
 
-      try { if (raid?.channel_id) await deleteGuildChannel(raid.channel_id); } catch (e) { console.warn("deleteGuildChannel:", e?.message||e); }
-      try { db.prepare(`DELETE FROM signups WHERE raid_id=?`).run(raidId); } catch {}
-      try { db.prepare(`DELETE FROM raids WHERE id=?`).run(raidId); } catch {}
+      try {
+        if (raid?.channel_id) await deleteGuildChannel(raid.channel_id);
+      } catch (e) {
+        console.warn("deleteGuildChannel:", e?.message||e);
+      }
 
-      // ⬇️ Schedule synchronisieren
+      try { db.prepare(`DELETE FROM signups WHERE raid_id=?`).run(raidId); } catch(e){ console.warn("delete signups:", e?.message||e); }
+      try { db.prepare(`DELETE FROM raids WHERE id=?`).run(raidId); } catch(e){ console.warn("delete raid:", e?.message||e); }
+
       try { rebuildScheduleBoards().catch(()=>{}); } catch {}
 
       return res.json({ ok: true, id: raidId });
@@ -463,23 +595,52 @@ export async function startServer() {
     }
   });
 
-  /* -------------------------------------------------------
-     NEU: Roster im Channel posten/aktualisieren
-     (nutzt bestehende Funktion publishRoster, nichts ersetzt)
-  ------------------------------------------------------- */
+  /* -------- Roster posten -------- */
+  app.post("/api/raids/:id/publish", ensureAuth, async (req, res) => {
+    try {
+      const raidId = Number(req.params.id);
+      const raid = Raids.get(raidId);
+      await assertCanManageRaid(req.user.id, raid);
+
+      const msg = await publishRoster(raidId);
+      res.json({ ok:true, message_id: msg?.id || null });
+    } catch (e) {
+      console.error("publish roster:", e);
+      res.status(500).json({ ok:false, error:"publish_failed" });
+    }
+  });
+
+  app.post("/api/raids/:id/publish-template", ensureAuth, async (req, res) => {
+    try {
+      const raidId = Number(req.params.id);
+      const raid = Raids.get(raidId);
+      await assertCanManageRaid(req.user.id, raid);
+
+      const msg = await postRosterTemplateWithPresets(raidId);
+      res.json({ ok:true, message_id: msg?.id || null });
+    } catch (e) {
+      console.error("publish roster template:", e);
+      res.status(500).json({ ok:false, error:"publish_template_failed" });
+    }
+  });
+
   app.post("/api/raids/:id/post-roster", ensureAuth, async (req, res) => {
     try {
       const raidId = Number(req.params.id);
       if (!raidId) return res.status(400).json({ ok:false, error:"invalid raid id" });
-      await publishRoster(raidId);
-      res.json({ ok:true });
+
+      const r = await postRosterTemplateWithPresets(raidId);
+      if (!r?.ok) console.warn("postRosterTemplateWithPresets:", r?.error);
+
+      try { await updateRaidMessage(raidId); } catch (e) { console.warn("updateRaidMessage after template:", e?.message||e); }
+
+      res.json({ ok:true, posted: !!r?.ok, messageId: r?.messageId, channelId: r?.channelId });
     } catch(e) {
       res.status(500).json({ ok:false, error: e?.message || "failed to post roster" });
     }
   });
 
-  registerCycleRoutes(app);
-
+  /* -------- Static/Vite -------- */
   if (isProd) {
     app.use(express.static(distRoot));
     app.get("*", async (_req,res)=>{
@@ -515,4 +676,12 @@ export async function startServer() {
 
   app.listen(CONFIG.port, ()=> console.log(`🌐 Server läuft auf Port ${CONFIG.port} (${process.env.NODE_ENV||"dev"})`));
   const mod=await ensureSchedulerLoaded(); if (mod?.startCharacterSync) mod.startCharacterSync(); if (mod?.startPickRelease) mod.startPickRelease?.();
+}
+
+// Autostart
+if (process.argv[1] && process.argv[1].endsWith("server.js")) {
+  startServer().catch((e)=> {
+    console.error("Server start failed:", e);
+    process.exit(1);
+  });
 }

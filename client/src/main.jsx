@@ -1,3 +1,4 @@
+// client/src/main.jsx
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
@@ -10,6 +11,9 @@ import Users from "./pages/Users.jsx";
 import RaidDetail from "./pages/RaidDetail.jsx";
 import Chars from "./pages/Chars.jsx";
 
+// 🔹 NEU: Seite zum Erstellen/Verwalten eigener Presets
+import Presets from "./pages/Presets.jsx";
+
 function App() {
   return (
     <AppShell>
@@ -19,6 +23,8 @@ function App() {
         <Route path="/chars" element={<Chars />} />
         <Route path="/users" element={<Users />} />
         <Route path="/raids/:id" element={<RaidDetail />} />
+        {/* 🔹 NEU: eigene Preset-Seite */}
+        <Route path="/presets" element={<Presets />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </AppShell>

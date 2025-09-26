@@ -562,6 +562,27 @@ export default function RaidDetail() {
   const rosterG = useMemo(() => groupByRole(roster), [roster]);
   const openG = useMemo(() => groupByRole(open), [open]);
 
+  /* ▼ NEU: Kapazitäten (Preset-Snapshot) + Belegt-Anzeige */
+  const caps = useMemo(() => ({
+    tank: Number(raid?.cap_tanks || 0),
+    healer: Number(raid?.cap_healers || 0),
+    dps: Number(raid?.cap_dps || 0),
+    lootbuddy: Number(raid?.cap_lootbuddies || 0),
+  }), [raid]);
+
+  const pickedCount = useMemo(() => ({
+    tank: rosterG.tank.length,
+    healer: rosterG.healer.length,
+    dps: rosterG.dps.length,
+    lootbuddy: rosterG.lootbuddy.length,
+  }), [rosterG]);
+
+  const countLabel = useCallback((role) => {
+    const used = Number(pickedCount[role] || 0);
+    const cap = Number(caps[role] || 0);
+    return `${used}/${cap}`;
+  }, [pickedCount, caps]);
+
   function hasTimeConflictForSignup(signup) {
     if (!cycleOk || !raid) return false;
     const currentStart = parseDate(raid?.datetime || raid?.date || raid?.date_str);
@@ -921,6 +942,10 @@ export default function RaidDetail() {
       {/* Roster (geplant) */}
       <div className="bg-slate-800/60 rounded-xl p-4 mb-4">
         <div className="text-slate-100 font-semibold mb-2">Roster (geplant)</div>
+        {/* ▼ NEU: Slot-Anzeige x/y */}
+        <div className="text-[12px] text-slate-300 mb-2">
+          Tanks {countLabel("tank")} • Healers {countLabel("healer")} • DPS {countLabel("dps")} • Lootbuddies {countLabel("lootbuddy")}
+        </div>
         <div className="flex flex-wrap gap-8">
           <RoleColumn title="Tanks" role="tank" items={rosterG.tank} charMap={charMap} onPick={handlePick} onUnpick={handleUnpick} />
           <RoleColumn title="DPS" role="dps" items={rosterG.dps} charMap={charMap} onPick={handlePick} onUnpick={handleUnpick} />
@@ -934,6 +959,10 @@ export default function RaidDetail() {
       {/* Signups (offen) */}
       <div className="bg-slate-800/60 rounded-xl p-4 mb-4">
         <div className="text-slate-100 font-semibold mb-2">Signups (offen)</div>
+        {/* ▼ NEU: Slot-Anzeige x/y (gleiche Anzeige, bezieht sich auf geplante Roster-Belegung) */}
+        <div className="text-[12px] text-slate-300 mb-2">
+          Tanks {countLabel("tank")} • Healers {countLabel("healer")} • DPS {countLabel("dps")} • Lootbuddies {countLabel("lootbuddy")}
+        </div>
         <div className="flex flex-wrap gap-8">
           <RoleColumn title="Tanks" role="tank" items={openG.tank} charMap={charMap} onPick={handlePick} onUnpick={handleUnpick} />
           <RoleColumn title="DPS" role="dps" items={openG.dps} charMap={charMap} onPick={handlePick} onUnpick={handleUnpick} />

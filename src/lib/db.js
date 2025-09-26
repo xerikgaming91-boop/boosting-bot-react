@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS signups (
   FOREIGN KEY(user_id) REFERENCES users(discord_id),
   FOREIGN KEY(character_id) REFERENCES characters(id)
 );
+
+/* === NEU: Raid-Size Presets =================================== */
+CREATE TABLE IF NOT EXISTS raid_presets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  tanks INTEGER NOT NULL DEFAULT 0,
+  healers INTEGER NOT NULL DEFAULT 0,
+  dps INTEGER NOT NULL DEFAULT 0,
+  lootbuddies INTEGER NOT NULL DEFAULT 0,
+  created_by TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
 `);
 
 // -------- Migrations --------
@@ -134,6 +146,13 @@ CREATE TABLE IF NOT EXISTS signups (
   // raids
   ensureColumn('raids', 'created_at', 'TEXT', `'${now()}'`);
   ensureColumn('raids', 'updated_at', 'TEXT', `'${now()}'`);
+
+  // 🔧 NEU: Snapshot-Felder für Kapazitäten + Preset-Referenz (idempotent)
+  ensureColumn('raids', 'preset_id', 'INTEGER', 'NULL');
+  ensureColumn('raids', 'cap_tanks', 'INTEGER', '0');
+  ensureColumn('raids', 'cap_healers', 'INTEGER', '0');
+  ensureColumn('raids', 'cap_dps', 'INTEGER', '0');
+  ensureColumn('raids', 'cap_lootbuddies', 'INTEGER', '0');
 
   // signups (Basis)
   ensureColumn('signups', 'created_at', 'TEXT', `'${now()}'`);
@@ -172,6 +191,9 @@ CREATE TABLE IF NOT EXISTS signups (
   ensureIndex('idx_chars_user', `CREATE INDEX IF NOT EXISTS idx_chars_user ON characters(user_id)`);
   ensureIndex('idx_raids_time', `CREATE INDEX IF NOT EXISTS idx_raids_time ON raids(datetime)`);
   ensureIndex('idx_signups_raid', `CREATE INDEX IF NOT EXISTS idx_signups_raid ON signups(raid_id)`);
+
+  // Optional: kleine Indizes für Presets / Snapshot
+  ensureIndex('idx_presets_created', `CREATE INDEX IF NOT EXISTS idx_presets_created ON raid_presets(created_at)`);
 })();
 
 // ================= Users =================
@@ -265,7 +287,12 @@ export const Raids = {
   update(payload) {
     db.prepare(`
       UPDATE raids
-      SET title=?, datetime=?, difficulty=?, loot_type=?, description=?, channel_id=?, message_id=?, roster_message_id=?, updated_at=?
+      SET title=?, datetime=?, difficulty=?, loot_type=?, description=?, channel_id=?, message_id=?, roster_message_id=?, updated_at=?,
+          preset_id=COALESCE(?, preset_id),
+          cap_tanks=COALESCE(?, cap_tanks),
+          cap_healers=COALESCE(?, cap_healers),
+          cap_dps=COALESCE(?, cap_dps),
+          cap_lootbuddies=COALESCE(?, cap_lootbuddies)
       WHERE id=?
     `).run(
       payload.title || null,
@@ -277,6 +304,12 @@ export const Raids = {
       payload.message_id || null,
       payload.roster_message_id || null,
       now(),
+      // NEU: Snapshot-Felder (optional mitgeben)
+      payload.preset_id ?? null,
+      typeof payload.cap_tanks === 'number' ? payload.cap_tanks : null,
+      typeof payload.cap_healers === 'number' ? payload.cap_healers : null,
+      typeof payload.cap_dps === 'number' ? payload.cap_dps : null,
+      typeof payload.cap_lootbuddies === 'number' ? payload.cap_lootbuddies : null,
       payload.id
     );
     return this.get(payload.id);
@@ -292,6 +325,48 @@ export const Raids = {
   delete(id) {
     db.prepare(`DELETE FROM signups WHERE raid_id=?`).run(id);
     db.prepare(`DELETE FROM raids WHERE id=?`).run(id);
+  }
+};
+
+// ================= Presets (NEU) =================
+export const Presets = {
+  list() {
+    return db.prepare(`
+      SELECT id, name, tanks, healers, dps, lootbuddies, created_by, created_at
+      FROM raid_presets
+      ORDER BY created_at DESC, id DESC
+    `).all();
+  },
+  get(id) {
+    return db.prepare(`SELECT * FROM raid_presets WHERE id=?`).get(id);
+  },
+  create({ name, tanks = 0, healers = 0, dps = 0, lootbuddies = 0, created_by = null }) {
+    const st = db.prepare(`
+      INSERT INTO raid_presets (name, tanks, healers, dps, lootbuddies, created_by, created_at)
+      VALUES (?,?,?,?,?,?,?)
+    `);
+    const info = st.run(String(name).trim(), ~~tanks, ~~healers, ~~dps, ~~lootbuddies, created_by || null, now());
+    return { id: info.lastInsertRowid, ...this.get(info.lastInsertRowid) };
+  },
+  update(id, { name, tanks, healers, dps, lootbuddies }) {
+    const cur = this.get(id);
+    if (!cur) return null;
+    db.prepare(`
+      UPDATE raid_presets
+         SET name=?, tanks=?, healers=?, dps=?, lootbuddies=?
+       WHERE id=?
+    `).run(
+      String((name ?? cur.name)).trim(),
+      ~~(tanks ?? cur.tanks),
+      ~~(healers ?? cur.healers),
+      ~~(dps ?? cur.dps),
+      ~~(lootbuddies ?? cur.lootbuddies),
+      id
+    );
+    return this.get(id);
+  },
+  delete(id) {
+    return db.prepare(`DELETE FROM raid_presets WHERE id=?`).run(id).changes > 0;
   }
 };
 

@@ -17,6 +17,8 @@ import {
 
 import { CONFIG } from "./config.js";
 import { db, Users, Raids, Signups } from "./db.js";
+/* 🔹 NEU: Template-Helfer (baut Text mit Platzhaltern "– frei –") */
+import { buildRosterText } from "./roster-template.js";
 
 /* =============================================================================
    Discord Client (Singleton)
@@ -1341,3 +1343,32 @@ async function ensureRaidMessageFirstPost(channel, raid) {
 }
 
 export { buildChannelName };
+
+/* =============================================================================
+   🔹 NEU: Roster-Template anhand Presets posten
+   - nutzt buildRosterText(raidId) → erzeugt Text mit Platzhaltern "– frei –"
+   - postet in raid.channel_id (oder channelIdOverride)
+============================================================================= */
+export async function postRosterTemplateWithPresets(raidId, channelIdOverride) {
+  try {
+    const raid = Raids.get ? await Raids.get(raidId) : db.prepare(`SELECT * FROM raids WHERE id=?`).get(raidId);
+    if (!raid) throw new Error("raid_not_found");
+
+    const channelId = channelIdOverride || raid.channel_id || process.env.CHANNEL_ID;
+    if (!channelId) throw new Error("channel_not_found");
+
+    const client = getClient();
+    if (!_ready) await startBot();
+
+    const ch = await client.channels.fetch(String(channelId)).catch(() => null);
+    if (!ch) throw new Error("channel_not_found");
+
+    const { text } = buildRosterText(raidId);
+    const msg = await ch.send({ content: text, allowedMentions: { parse: [] } });
+
+    return { ok: true, messageId: msg.id, channelId: ch.id };
+  } catch (e) {
+    console.warn("postRosterTemplateWithPresets:", e?.message || e);
+    return { ok: false, error: e?.message || String(e) };
+  }
+}

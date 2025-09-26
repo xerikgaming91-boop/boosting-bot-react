@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import useWhoAmI from "../hooks/useWhoAmI.js";
+/* 🔹 NEU: Preset-Dropdown */
+import PresetSelect from "../components/PresetSelect.jsx";
 
 async function api(url, opts = {}) {
   const res = await fetch(url, {
@@ -79,6 +81,10 @@ export default function Raids() {
   const [lootType, setLootType] = useState("unsaved");
   const [description, setDescription] = useState("");
   const [mythicBosses, setMythicBosses] = useState(8);
+
+  /* 🔹 NEU: Preset-Auswahl */
+  const [presetId, setPresetId] = useState(null);
+  const [presetPreview, setPresetPreview] = useState(null);
 
   // Raidlead (nur Admin)
   const [raidLeads, setRaidLeads] = useState([]);
@@ -229,6 +235,8 @@ export default function Raids() {
         difficulty,
         loot_type: lootType,
         description,
+        /* 🔹 NEU: preset_id mitsenden, falls gewählt */
+        ...(presetId ? { preset_id: Number(presetId) } : {}),
       };
       if (difficulty === "Mythic") body.mythic_bosses = Number(bosses);
       if (isAdmin && createdBy) body.created_by = createdBy;
@@ -246,6 +254,8 @@ export default function Raids() {
       setDifficulty("Heroic");
       setLootType("unsaved");
       setMythicBosses(8);
+      setPresetId(null);
+      setPresetPreview(null);
     } catch (e) {
       setErr(e);
     } finally {
@@ -435,6 +445,25 @@ export default function Raids() {
                   )}
                 </div>
               )}
+            </div>
+
+            {/* 🔹 NEU: Preset-Auswahl */}
+            <div>
+              <label className="block text-sm text-slate-300 mb-1">Roster-Preset</label>
+              <div className="flex items-center gap-3">
+                <PresetSelect
+                  value={presetId}
+                  onChange={setPresetId}
+                  onApplyPreview={setPresetPreview}
+                />
+                {presetPreview ? (
+                  <span className="text-xs text-slate-400">
+                    Tanks {presetPreview.tanks} • Healer {presetPreview.healers} • DPS {presetPreview.dps} • Loot {presetPreview.lootbuddies}
+                  </span>
+                ) : (
+                  <span className="text-xs text-slate-500">Optional</span>
+                )}
+              </div>
             </div>
 
             <div>

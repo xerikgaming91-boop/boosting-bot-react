@@ -29,6 +29,10 @@ export default function NavBar() {
           <NavLink to="/users" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
             Benutzer
           </NavLink>
+          {/* 🔹 NEU: Link zur Preset-Seite */}
+          <NavLink to="/presets" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
+            Presets
+          </NavLink>
         </nav>
 
         <div className="flex items-center gap-3">
