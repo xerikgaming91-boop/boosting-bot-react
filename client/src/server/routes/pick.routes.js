@@ -2,14 +2,14 @@
 // Stellt /api/raids/:id/pick und /api/raids/:id/unpick bereit – ohne deine
 // vorhandenen Routen zu verändern. Es wird nur das bestehende Embed aktualisiert.
 
-import { db } from "./db.js"; // nutzt DEINE bestehende DB-Instanz
+import { db } from "../db.js"; // nutzt DEINE bestehende DB-Instanz
 import {
   getSignupById,
   setExclusivePick,
   setPickedFlag,
-} from "./signups.helpers.js";
+} from "../signups.helpers.js";
 // Wir rufen NUR das bestehende Embed-Update auf – KEIN Roster-Repost!
-import { updateRaidMessage } from "./bot.js";
+import { updateRaidMessage } from "../bot.js";
 
 // Wenn du bereits ein ensureAuth hast, kannst du es injizieren.
 // Hier optionaler Fallback, damit es keine Abhängigkeit zerreißt:

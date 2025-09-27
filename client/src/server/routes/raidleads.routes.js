@@ -1,7 +1,7 @@
 // src/server/raidleads.js
-import { CONFIG } from "./config.js";
-import { Users } from "./db.js";
-import { getClient } from "./bot.js";
+import { CONFIG } from "../config.js";
+import { Users } from "../db.js";
+import { getClient } from "../bot.js";
 
 /**
  * Liefert ausschließlich Mitglieder mit der RAIDLEAD_ROLE_ID.

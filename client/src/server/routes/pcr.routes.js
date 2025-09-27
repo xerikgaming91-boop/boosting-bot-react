@@ -1,7 +1,7 @@
 // src/server/pcr.routes.js
 import express from "express";
 import crypto from "crypto";
-import { db, Raids } from "./db.js";
+import { db, Raids } from "../db.js";
 
 const router = express.Router();
 

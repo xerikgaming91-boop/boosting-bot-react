@@ -3,9 +3,9 @@
 // Es werden KEINE zusätzlichen Kanäle erstellt oder verschoben.
 
 import { ChannelType } from "discord.js";
-import { CONFIG } from "./config.js";
-import { db, Users } from "./db.js";
-import { getClient } from "./bot.js";
+import { CONFIG } from "../config.js";
+import { db, Users } from "../db.js";
+import { getClient } from "../bot.js";
 
 /* ───────── Zeit/Cycle ───────── */
 const pad = (n) => String(n).padStart(2, "0");

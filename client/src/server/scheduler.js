@@ -1,6 +1,6 @@
 import { Characters } from './db.js';
-import { fetchFromRaiderIO } from './raiderio.js';
-import { maybeAddWarcraftLogsInfo } from './wcl.js';
+import { fetchFromRaiderIO } from './routes/raiderio.routes.js';
+import { maybeAddWarcraftLogsInfo } from './routes/wcl.routes.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
