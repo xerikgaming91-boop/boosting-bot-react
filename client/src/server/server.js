@@ -1,4 +1,4 @@
-// src/lib/server.js
+// src/server/server.js
 import express from "express";
 import session from "express-session";
 import passport from "passport";

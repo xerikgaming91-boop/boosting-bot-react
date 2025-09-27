@@ -1,4 +1,4 @@
-// src/lib/roster.routes.js
+// src/server/roster.routes.js
 import express from "express";
 
 /**

@@ -1,4 +1,4 @@
-// src/lib/schedule.js
+// src/server/schedule.js
 // Schreibt NUR die Listen in #current / #next mit Links auf die ECHTEN Raid-Textchannels.
 // Es werden KEINE zusätzlichen Kanäle erstellt oder verschoben.
 

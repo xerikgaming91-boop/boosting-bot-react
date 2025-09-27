@@ -1,4 +1,4 @@
-// src/lib/signups.helpers.js
+// src/server/signups.helpers.js
 // Kleine, eigenständige Helfer rund um Signups/Picks.
 // Nichts in deinen bestehenden Dateien wird überschrieben.
 

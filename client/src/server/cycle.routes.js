@@ -1,4 +1,4 @@
-// src/lib/cycle.routes.js
+// src/server/cycle.routes.js
 import express from "express";
 import { db, Raids } from "./db.js";
 

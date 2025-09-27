@@ -1,4 +1,4 @@
-// src/lib/routes/users.routes.js
+// src/server/routes/users.routes.js
 // Robuste Users + Characters API:
 // - nutzt bevorzugt Characters.listByUser(uid) aus dem DB-Modul,
 // - fallback auf dynamische Schema-Erkennung (PRAGMA),

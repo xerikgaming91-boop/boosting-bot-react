@@ -1,4 +1,4 @@
-// src/lib/pick.routes.js
+// src/server/pick.routes.js
 // Stellt /api/raids/:id/pick und /api/raids/:id/unpick bereit – ohne deine
 // vorhandenen Routen zu verändern. Es wird nur das bestehende Embed aktualisiert.
 

@@ -1,4 +1,4 @@
-// src/lib/config.js
+// src/server/config.js
 import dotenv from "dotenv";
 dotenv.config();
 

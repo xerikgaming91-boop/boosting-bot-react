@@ -1,6 +1,6 @@
 // src/index.js
-import { startBot } from "./lib/bot.js";
-import { startServer } from "./lib/server.js";
+import { startBot } from "./server/bot.js";
+import { startServer } from "./server/server.js";
 
 process.on("unhandledRejection", (err) => {
   console.error("Unhandled rejection:", err);

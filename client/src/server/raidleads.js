@@ -1,4 +1,4 @@
-// src/lib/raidleads.js
+// src/server/raidleads.js
 import { CONFIG } from "./config.js";
 import { Users } from "./db.js";
 import { getClient } from "./bot.js";

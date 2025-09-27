@@ -5,9 +5,9 @@
   "type": "module",
   "description": "Discord boosting bot with React (Vite) UI on a single Express port (dev & prod), SQLite, Raider.IO import, Discord signups + roster.",
   "scripts": {
-    "dev": "cross-env NODE_ENV=development nodemon src/index.js",
+    "dev": "cross-env NODE_ENV=development nodemon --watch client/src --ext js,mjs,ts,tsx client/src/index.js",
+    "start": "cross-env NODE_ENV=production node client/src/index.js",
     "build": "vite build --config client/vite.config.js",
-    "start": "cross-env NODE_ENV=production node src/index.js",
     "db:wipe:raids": "node scripts/db-tools.mjs wipe-raids",
     "db:wipe:all": "node scripts/db-tools.mjs wipe-all"
   },

@@ -1,4 +1,4 @@
-// src/lib/roster-template.js
+// src/server/roster-template.js
 //
 // Roster-Posting mit Preset-Kapazitäten und optimierter Darstellung:
 // - Titelzeile oben (Raidtitel)

@@ -2,6 +2,7 @@
   "name": "client",
   "private": true,
   "version": "1.0.1",
+  "type": "module",
   "description": "React UI wird über Express (ein Port) bereitgestellt. Nicht separat starten.",
   "scripts": {
     "dev": "node -e \"console.error('❌ Bitte im Projekt-Root npm run dev starten – alles läuft auf http://localhost:3000'); process.exit(1)\"",

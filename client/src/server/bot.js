@@ -1,4 +1,4 @@
-// src/lib/bot.js
+// src/server/bot.js
 import {
   Client,
   GatewayIntentBits,
