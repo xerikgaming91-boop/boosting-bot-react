@@ -14,12 +14,9 @@ import { maybeAddWarcraftLogsInfo } from "./routes/wcl.routes.js";
 
 import {
   createRaidChannel,
-  publishRoster,
   updateRaidMessage,
-  postRaidAnnouncement,
   ensureMemberRaidleadFlag,
   hasElevatedRaidPermissions,
-  renameRaidChannel,
   deleteGuildChannel,
   postRosterText,
   buildChannelName,
@@ -38,7 +35,7 @@ import { rebuildScheduleBoards } from "./routes/schedule.routes.js";
 
 // Router
 import createPresetRoutes from "./routes/presets.routes.js";      // /api/presets
-import usersRouter from "./routes/users.routes.js";        // /api/users ...
+import usersRouter from "./routes/users.routes.js";               // /api/users ...
 import createCycleRoutes from "./routes/cycle.routes.js";         // /api/raids/:id/cycle-assignments
 import createPcrRoutes from "./routes/pcr.routes.js";             // /api/raids/:id/pcr   ⬅️ NEU
 
@@ -410,9 +407,10 @@ export async function startServer() {
         const chId = await createRaidChannel(raid);
         if (chId) {
           const updated = Raids.update({ ...raid, channel_id: chId });
-          await postRaidAnnouncement(updated.id);
+          // statt postRaidAnnouncement: sicheres Update/Erstellen der Raid-Message
+          await updateRaidMessage(updated.id);
         }
-      } catch(e){ console.warn("⚠️ createRaidChannel/postRaidAnnouncement:", e?.message||e); }
+      } catch(e){ console.warn("⚠️ createRaidChannel/updateRaidMessage:", e?.message||e); }
 
       try { rebuildScheduleBoards().catch(()=>{}); } catch {}
 
@@ -447,7 +445,7 @@ export async function startServer() {
       const updated = Raids.update({ ...exist, title, datetime, difficulty, loot_type, description: description||"", created_by: ownerId });
 
       try { await updateRaidMessage(id); } catch(e){ console.warn("⚠️ updateRaidMessage:", e?.message||e); }
-      try { await renameRaidChannel(id); } catch(e){ console.warn("⚠️ renameRaidChannel:", e?.message||e); }
+      // renameRaidChannel entfernt (nicht vorhanden)
 
       try { rebuildScheduleBoards().catch(()=>{}); } catch {}
 
@@ -608,8 +606,9 @@ export async function startServer() {
       const raid = Raids.get(raidId);
       await assertCanManageRaid(req.user.id, raid);
 
-      const msg = await publishRoster(raidId);
-      res.json({ ok:true, message_id: msg?.id || null });
+      // statt publishRoster: einfache Textvariante posten
+      const messageId = await postRosterText(raidId);
+      res.json({ ok:true, message_id: messageId || null });
     } catch (e) {
       console.error("publish roster:", e);
       res.status(500).json({ ok:false, error:"publish_failed" });
@@ -622,8 +621,8 @@ export async function startServer() {
       const raid = Raids.get(raidId);
       await assertCanManageRaid(req.user.id, raid);
 
-      const msg = await postRosterTemplateWithPresets(raidId);
-      res.json({ ok:true, message_id: msg?.id || null });
+      const r = await postRosterTemplateWithPresets(raidId);
+      res.json({ ok:true, message_id: r?.messageId || null });
     } catch (e) {
       console.error("publish roster template:", e);
       res.status(500).json({ ok:false, error:"publish_template_failed" });
